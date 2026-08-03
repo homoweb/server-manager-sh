@@ -80,7 +80,7 @@ deploy_site() {
         echo -e "\e[32mUser '$USERNAME' created.\e[0m"
     fi
     
-    mkdir -p /home/"$USERNAME"/web
+    mkdir -p /home/"$USERNAME"
     chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"
 
     echo "Select deployment method:"
@@ -95,11 +95,11 @@ deploy_site() {
             GIT_BRANCH=${GIT_BRANCH:-main}
             
             # Clean directory for clone
-            rm -rf /home/"$USERNAME"/web/* /home/"$USERNAME"/web/.[!.]*
+            rm -rf /home/"$USERNAME"/* /home/"$USERNAME"/.[!.]*
             
-            sudo -u "$USERNAME" git clone -b "$GIT_BRANCH" "$GIT_URL" /home/"$USERNAME"/web
+            sudo -u "$USERNAME" git clone -b "$GIT_BRANCH" "$GIT_URL" /home/"$USERNAME"
             
-            cd /home/"$USERNAME"/web
+            cd /home/"$USERNAME"
             if [ -f "composer.json" ]; then 
                 sudo -u "$USERNAME" composer install --no-dev --optimize-autoloader
             fi
@@ -112,10 +112,10 @@ deploy_site() {
             fi
             ;;
         2)
-            echo -e "\e[33mUpload your files to: /home/$USERNAME/web\e[0m"
-            echo "Example SCP: scp -r /local/path/* root@your_server_ip:/home/$USERNAME/web/"
+            echo -e "\e[33mUpload your files to: /home/$USERNAME\e[0m"
+            echo "Example SCP: scp -r /local/path/* root@your_server_ip:/home/$USERNAME/"
             read -p "Press Enter ONLY AFTER you have uploaded the files to continue..."
-            chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"/web
+            chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"
             ;;
         *)
             echo "Invalid choice. Proceeding without deployment."
@@ -145,7 +145,7 @@ EOF
 server {
     listen 80;
     server_name $DOMAIN;
-    root /home/$USERNAME/web/public;
+    root /home/$USERNAME/public;
     index index.php index.html index.htm;
     
     location / {
@@ -161,7 +161,7 @@ EOF
     ln -sf "$VHOST_CONF" /etc/nginx/sites-enabled/
     systemctl reload nginx
     
-    echo -e "\e[32mSite $DOMAIN deployed. Root: /home/$USERNAME/web\e[0m"
+    echo -e "\e[32mSite $DOMAIN deployed. Root: /home/$USERNAME\e[0m"
 }
 
 
