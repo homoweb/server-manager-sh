@@ -64,9 +64,16 @@ deploy_site() {
     read -p "Enter system username for isolation: " USERNAME
     
     # Create user
-    useradd -m -s /bin/bash "$USERNAME"
+    if id "$USERNAME" &>/dev/null; then
+        echo -e "\e[33mUser '$USERNAME' already exists. Using existing user.\e[0m"
+    else
+        useradd -m -s /bin/bash "$USERNAME"
+        echo -e "\e[32mUser '$USERNAME' created.\e[0m"
+    fi
+    
     mkdir -p /home/"$USERNAME"/web
     chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"
+
     
     # PHP-FPM Pool
     POOL_CONF="/etc/php/8.4/fpm/pool.d/$USERNAME.conf"
