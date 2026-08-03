@@ -18,18 +18,18 @@ check_root() {
 }
 
 install_to_bin() {
-    cp "$0" /usr/local/bin/lsm
-    chmod +x /usr/local/bin/lsm
-    echo -e "${GREEN}Script installed. Run 'sudo lsm' from anywhere.${NC}"
+    curl -fsSL https://raw.githubusercontent.com/homoweb/server-manager-sh/main/server_manager.sh -o /usr/local/bin/homoweb
+    chmod +x /usr/local/bin/homoweb
+    echo -e "${GREEN}Script installed. Run 'sudo homoweb' from anywhere.${NC}"
 }
 
 change_mirror() {
     CODENAME=$(lsb_release -cs)
     cat <<EOF > /etc/apt/sources.list
-deb https://repo.abrha.net/ubuntu/ $CODENAME main restricted universe multiverse
-deb https://repo.abrha.net/ubuntu/ $CODENAME-updates main restricted universe multiverse
-deb https://repo.abrha.net/ubuntu/ $CODENAME-security main restricted universe multiverse
-EOF
+    deb https://repo.abrha.net/ubuntu/ $CODENAME main restricted universe multiverse
+    deb https://repo.abrha.net/ubuntu/ $CODENAME-updates main restricted universe multiverse
+    deb https://repo.abrha.net/ubuntu/ $CODENAME-security main restricted universe multiverse
+    EOF
     apt-get update
     echo -e "${GREEN}Mirror updated to repo.abrha.net.${NC}"
 }
@@ -133,12 +133,6 @@ harden_server() {
     sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
     systemctl restart sshd
     echo -e "${GREEN}Server hardened.${NC}"
-}
-
-install_to_bin() {
-    curl -fsSL https://raw.githubusercontent.com/homoweb/server-manager-sh/main/server_manager.sh -o /usr/local/bin/homoweb
-    chmod +x /usr/local/bin/homoweb
-    echo -e "${GREEN}Script installed. Run 'sudo homoweb' from anywhere.${NC}"
 }
 
 show_menu() {
