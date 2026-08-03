@@ -136,7 +136,7 @@ harden_server() {
 }
 
 install_to_bin() {
-    cp "$0" /usr/local/bin/homoweb
+    curl -fsSL https://raw.githubusercontent.com/homoweb/server-manager-sh/main/server_manager.sh -o /usr/local/bin/homoweb
     chmod +x /usr/local/bin/homoweb
     echo -e "${GREEN}Script installed. Run 'sudo homoweb' from anywhere.${NC}"
 }
