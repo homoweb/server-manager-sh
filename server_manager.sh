@@ -190,8 +190,72 @@ harden_server() {
     echo -e "${GREEN}Server hardened.${NC}"
 }
 
+manage_database_menu() {
+    while true; do
+        echo -e "\n--- Database Management ---"
+        echo "1) Create Database & User"
+        echo "2) List Databases"
+        echo "3) Delete Database"
+        echo "4) Change Database User Password"
+        echo "0) Back to Main Menu"
+        read -p "Select an option: " db_choice
+
+        case $db_choice in
+            1)
+                read -p "Enter Database Name: " db_name
+                read -p "Enter Database User: " db_user
+                read -sp "Enter Database Password: " db_pass
+                echo ""
+                if [[ -z "$db_name" || -z "$db_user" || -z "$db_pass" ]]; then
+                    echo -e "\e[31mError: All fields are required.\e[0m"
+                else
+                    mysql -e "CREATE DATABASE IF NOT EXISTS \`${db_name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+                    mysql -e "CREATE USER IF NOT EXISTS '${db_user}'@'localhost' IDENTIFIED BY '${db_pass}';"
+                    mysql -e "GRANT ALL PRIVILEGES ON \`${db_name}\`.* TO '${db_user}'@'localhost';"
+                    mysql -e "FLUSH PRIVILEGES;"
+                    echo -e "\e[32mSuccess: Database '${db_name}' and user '${db_user}' created.\e[0m"
+                fi
+                ;;
+            2)
+                echo -e "\n--- Existing Databases ---"
+                mysql -e "SHOW DATABASES;" | grep -Ev "^(Database|information_schema|performance_schema|mysql|sys)$"
+                ;;
+            3)
+                echo -e "\n--- Existing Databases ---"
+                mysql -e "SHOW DATABASES;" | grep -Ev "^(Database|information_schema|performance_schema|mysql|sys)$"
+                echo ""
+                read -p "Enter Database Name to DELETE (or press Enter to cancel): " del_db
+                if [[ -n "$del_db" ]]; then
+                    mysql -e "DROP DATABASE IF EXISTS \`${del_db}\`;"
+                    echo -e "\e[32mSuccess: Database '${del_db}' deleted.\e[0m"
+                fi
+                ;;
+            4)
+                read -p "Enter Database User to edit: " edit_user
+                read -sp "Enter New Password: " new_pass
+                echo ""
+                if [[ -n "$edit_user" && -n "$new_pass" ]]; then
+                    mysql -e "ALTER USER '${edit_user}'@'localhost' IDENTIFIED BY '${new_pass}';"
+                    mysql -e "FLUSH PRIVILEGES;"
+                    echo -e "\e[32mSuccess: Password updated for user '${edit_user}'.\e[0m"
+                else
+                    echo -e "\e[31mError: User and password are required.\e[0m"
+                fi
+                ;;
+            0)
+                break
+                ;;
+            *)
+                echo -e "\e[31mInvalid option.\e[0m"
+                ;;
+        esac
+    done
+}
+
+
 show_menu() {
     echo -e "\n=== Server Manager (homoweb) ==="
+    echo "0) Exit"
     echo "1) Install to /usr/local/bin (homoweb)"
     echo "2) Change Mirror (repo.abrha.net)"
     echo "3) Install Full Stack (Nginx, PHP 8.4, MySQL, Redis, Node)"
@@ -199,9 +263,10 @@ show_menu() {
     echo "5) Install SSL (Certbot)"
     echo "6) Manage Firewall (UFW)"
     echo "7) Harden Server (SSH)"
-    echo "8) Exit"
+    echo "8) Manage DB"
     read -p "Option: " OPT
     case $OPT in
+        0) exit 0 ;;
         1) install_to_bin ;;
         2) change_mirror ;;
         3) install_stack ;;
@@ -209,7 +274,7 @@ show_menu() {
         5) install_ssl ;;
         6) manage_firewall ;;
         7) harden_server ;;
-        8) exit 0 ;;
+        8) manage_database_menu ;;
         *) echo "Invalid option." ;;
     esac
 }
