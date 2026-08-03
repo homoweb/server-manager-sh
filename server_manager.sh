@@ -296,6 +296,117 @@ manage_database_menu() {
     done
 }
 
+manage_cron() {
+    while true; do
+        echo -e "\n--- Cron Management ---"
+        echo "1) List Jobs"
+        echo "2) Add Job"
+        echo "3) Delete Job"
+        echo "0) Back"
+        read -p "Choice: " CRON_CHOICE
+
+        case $CRON_CHOICE in
+            1)
+                read -p "Enter username (e.g., root, or isolated user): " C_USER
+                crontab -u "$C_USER" -l || echo "No crontab for $C_USER"
+                ;;
+            2)
+                read -p "Enter username to run cron as: " C_USER
+                echo -e "\e[33mExample Schedule:\e[0m * * * * * (Every minute)"
+                read -p "Enter schedule expression: " C_SCHED
+                echo -e "\e[33mExample Command:\e[0m cd /home/user && php artisan schedule:run >> /dev/null 2>&1"
+                read -p "Enter command: " C_CMD
+                
+                (crontab -u "$C_USER" -l 2>/dev/null; echo "$C_SCHED $C_CMD") | crontab -u "$C_USER" -
+                echo -e "\e[32mJob added successfully.\e[0m"
+                ;;
+            3)
+                read -p "Enter username to manage: " C_USER
+                crontab -u "$C_USER" -l > /tmp/cron.tmp 2>/dev/null
+                if [ ! -s /tmp/cron.tmp ]; then 
+                    echo -e "\e[31mNo jobs found for $C_USER.\e[0m"
+                    continue
+                fi
+                echo "Current Jobs:"
+                cat -n /tmp/cron.tmp
+                read -p "Enter line number to delete: " LINE_NUM
+                if [[ "$LINE_NUM" =~ ^[0-9]+$ ]]; then
+                    sed -i "${LINE_NUM}d" /tmp/cron.tmp
+                    crontab -u "$C_USER" /tmp/cron.tmp
+                    echo -e "\e[32mJob deleted.\e[0m"
+                else
+                    echo -e "\e[31mInvalid line number.\e[0m"
+                fi
+                rm -f /tmp/cron.tmp
+                ;;
+            0) break ;;
+            *) echo -e "\e[31mInvalid choice.\e[0m" ;;
+        esac
+    done
+}
+
+manage_supervisor() {
+    while true; do
+        echo -e "\n--- Supervisor Management ---"
+        echo "1) List Processes"
+        echo "2) Add Process"
+        echo "3) Delete Process"
+        echo "0) Back"
+        read -p "Choice: " SUP_CHOICE
+
+        case $SUP_CHOICE in
+            1)
+                supervisorctl status
+                ;;
+            2)
+                read -p "Program Name (e.g., myapp-worker): " PROG_NAME
+                read -p "Run as User (e.g., username): " PROG_USER
+                read -p "Directory (e.g., /home/username): " PROG_DIR
+                echo -e "\e[33mExample Command:\e[0m php artisan queue:work --sleep=3 --tries=3"
+                read -p "Command: " PROG_CMD
+                read -p "Number of processes (default 1): " PROG_NUM
+                PROG_NUM=${PROG_NUM:-1}
+                
+                CONF_PATH="/etc/supervisor/conf.d/${PROG_NAME}.conf"
+                cat <<EOF > "$CONF_PATH"
+[program:${PROG_NAME}]
+process_name=%(program_name)s_%(process_num)02d
+command=${PROG_CMD}
+autostart=true
+autorestart=true
+user=${PROG_USER}
+numprocs=${PROG_NUM}
+redirect_stderr=true
+stdout_logfile=${PROG_DIR}/${PROG_NAME}_worker.log
+directory=${PROG_DIR}
+EOF
+                supervisorctl reread
+                supervisorctl update
+                supervisorctl start ${PROG_NAME}:*
+                echo -e "\e[32mProcess $PROG_NAME added and started.\e[0m"
+                ;;
+            3)
+                echo "Installed Supervisor Configurations:"
+                ls -1 /etc/supervisor/conf.d/ | sed 's/\.conf$//'
+                read -p "Enter Program Name to delete: " PROG_NAME
+                CONF_PATH="/etc/supervisor/conf.d/${PROG_NAME}.conf"
+                
+                if [ -f "$CONF_PATH" ]; then
+                    supervisorctl stop ${PROG_NAME}:*
+                    rm -f "$CONF_PATH"
+                    supervisorctl reread
+                    supervisorctl update
+                    echo -e "\e[32mProcess $PROG_NAME deleted.\e[0m"
+                else
+                    echo -e "\e[31mConfiguration not found.\e[0m"
+                fi
+                ;;
+            0) break ;;
+            *) echo -e "\e[31mInvalid choice.\e[0m" ;;
+        esac
+    done
+}
+
 
 show_menu() {
     echo -e "\n=== Server Manager (homoweb) ==="
@@ -308,6 +419,8 @@ show_menu() {
     echo "6) Manage Firewall (UFW)"
     echo "7) Harden Server (SSH)"
     echo "8) Manage DB"
+    echo "9) Manage Cron"
+    echo "10) Manage Supervisor"
     read -p "Option: " OPT
     case $OPT in
         0) exit 0 ;;
