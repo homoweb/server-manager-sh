@@ -155,7 +155,6 @@ deploy_site() {
             fi
             ;;
         2)
-            # Detect IP and strictly filter for IPv4 format to avoid HTML errors
             SERVER_IP=$(hostname -I | awk '{print $1}')
             
             echo -e "\n\e[33mStep 1: Upload your project's ZIP file using this command:\e[0m"
@@ -163,8 +162,8 @@ deploy_site() {
             echo
             read -p "Press Enter ONLY AFTER the upload is finished..."
             
-            # Find the first .zip file in the user's home directory
-            ZIP_FILE=$(ls /home/"$USERNAME"/*.zip 2>/dev/null | head -n 1)
+            # Use find instead of ls to avoid ANSI color code issues
+            ZIP_FILE=$(find "/home/$USERNAME" -maxdepth 1 -type f -name "*.zip" | head -n 1)
             DOMAIN_DIR="/home/$USERNAME/$DOMAIN"
             
             if [ -n "$ZIP_FILE" ] && [ -f "$ZIP_FILE" ]; then
@@ -181,6 +180,7 @@ deploy_site() {
                 echo -e "\e[31mError: No .zip file found in /home/$USERNAME\e[0m"
             fi
             ;;
+
 
 
     esac
