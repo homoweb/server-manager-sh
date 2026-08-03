@@ -74,7 +74,45 @@ deploy_site() {
     mkdir -p /home/"$USERNAME"/web
     chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"
 
-    
+    echo "Select deployment method:"
+    echo "1) Git Repository"
+    echo "2) Manual Upload (SFTP/SCP)"
+    read -p "Choice (1 or 2): " DEPLOY_METHOD
+
+    case $DEPLOY_METHOD in
+        1)
+            read -p "Enter Git Repository URL: " GIT_URL
+            read -p "Enter branch (default: main): " GIT_BRANCH
+            GIT_BRANCH=${GIT_BRANCH:-main}
+            
+            # Clean directory for clone
+            rm -rf /home/"$USERNAME"/web/* /home/"$USERNAME"/web/.[!.]*
+            
+            sudo -u "$USERNAME" git clone -b "$GIT_BRANCH" "$GIT_URL" /home/"$USERNAME"/web
+            
+            cd /home/"$USERNAME"/web
+            if [ -f "composer.json" ]; then 
+                sudo -u "$USERNAME" composer install --no-dev --optimize-autoloader
+            fi
+            if [ -f "package.json" ]; then 
+                sudo -u "$USERNAME" npm install && sudo -u "$USERNAME" npm run build
+            fi
+            if [ -f "artisan" ]; then
+                sudo -u "$USERNAME" cp .env.example .env
+                sudo -u "$USERNAME" php artisan key:generate
+            fi
+            ;;
+        2)
+            echo -e "\e[33mUpload your files to: /home/$USERNAME/web\e[0m"
+            echo "Example SCP: scp -r /local/path/* root@your_server_ip:/home/$USERNAME/web/"
+            read -p "Press Enter ONLY AFTER you have uploaded the files to continue..."
+            chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"/web
+            ;;
+        *)
+            echo "Invalid choice. Proceeding without deployment."
+            ;;
+    esac
+
     # PHP-FPM Pool
     POOL_CONF="/etc/php/8.4/fpm/pool.d/$USERNAME.conf"
     cat <<EOF > "$POOL_CONF"
@@ -111,11 +149,12 @@ server {
     }
 }
 EOF
-    ln -s "$VHOST_CONF" /etc/nginx/sites-enabled/
+    ln -sf "$VHOST_CONF" /etc/nginx/sites-enabled/
     systemctl reload nginx
     
-    echo -e "${GREEN}Site $DOMAIN deployed. Root: /home/$USERNAME/web${NC}"
+    echo -e "\e[32mSite $DOMAIN deployed. Root: /home/$USERNAME/web\e[0m"
 }
+
 
 install_ssl() {
     read -p "Enter domain: " DOMAIN
