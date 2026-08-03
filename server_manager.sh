@@ -154,25 +154,29 @@ deploy_site() {
                 sudo -u "$USERNAME" php artisan key:generate
             fi
             ;;
-        2)
-    
+                2)
+            SERVER_IP=$(curl -s -4 ifconfig.me || curl -s -4 api.ipify.org || hostname -I | awk '{print $1}')
+            
             echo -e "\n\e[33mStep 1: Upload your project's ZIP file using this command:\e[0m"
-            echo "scp /local/path/to/project.zip $USERNAME@your_server_ip:/home/$USERNAME/project.zip"
+            echo "scp /local/path/to/project.zip $USERNAME@$SERVER_IP:/home/$USERNAME/project.zip"
             echo
             read -p "Press Enter ONLY AFTER the upload is finished..."
             
             ZIP_FILE="/home/$USERNAME/project.zip"
+            DOMAIN_DIR="/home/$USERNAME/$DOMAIN"
+            
             if [ -f "$ZIP_FILE" ]; then
                 echo "Extracting project files..."
-                # Extract directly into /home/$USERNAME, overwriting existing files except .ssh
-                sudo -u "$USERNAME" unzip -o -q "$ZIP_FILE" -d /home/"$USERNAME"
+                sudo -u "$USERNAME" mkdir -p "$DOMAIN_DIR"
+                sudo -u "$USERNAME" unzip -o -q "$ZIP_FILE" -d "$DOMAIN_DIR"
                 rm -f "$ZIP_FILE"
-                chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"
+                chown -R "$USERNAME":"$USERNAME" "$DOMAIN_DIR"
                 echo -e "\e[32mExtraction complete and zip archive removed.\e[0m"
             else
                 echo -e "\e[31mError: project.zip not found in /home/$USERNAME\e[0m"
             fi
             ;;
+
     esac
 
     # PHP-FPM Pool
