@@ -26,10 +26,10 @@ install_to_bin() {
 change_mirror() {
     CODENAME=$(lsb_release -cs)
     cat <<EOF > /etc/apt/sources.list
-    deb https://repo.abrha.net/ubuntu/ $CODENAME main restricted universe multiverse
-    deb https://repo.abrha.net/ubuntu/ $CODENAME-updates main restricted universe multiverse
-    deb https://repo.abrha.net/ubuntu/ $CODENAME-security main restricted universe multiverse
-    EOF
+deb https://repo.abrha.net/ubuntu/ $CODENAME main restricted universe multiverse
+deb https://repo.abrha.net/ubuntu/ $CODENAME-updates main restricted universe multiverse
+deb https://repo.abrha.net/ubuntu/ $CODENAME-security main restricted universe multiverse
+EOF
     apt-get update
     echo -e "${GREEN}Mirror updated to repo.abrha.net.${NC}"
 }
