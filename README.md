@@ -7,7 +7,7 @@
 فقط با اجرای دستور زیر در سرور اوبونتو، اسکریپت دانلود و اجرا می‌شود:
 ```bash
 bash <(curl -s https://raw.githubusercontent.com/homoweb/server-manager-sh/main/server_manager.sh)
-
+```
 پس از اولین اجرا، اسکریپت به صورت خودکار در سیستم نصب می‌شود. برای اجراهای بعدی، در هر مسیر از سرور فقط دستور زیر را وارد کنید:
 
 bash
