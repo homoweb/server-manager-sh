@@ -154,8 +154,8 @@ deploy_site() {
                 sudo -u "$USERNAME" php artisan key:generate
             fi
             ;;
-                2)
-            SERVER_IP=$(curl -s -4 ifconfig.me || curl -s -4 api.ipify.org || hostname -I | awk '{print $1}')
+        2)
+            SERVER_IP=your_server_ip
             
             echo -e "\n\e[33mStep 1: Upload your project's ZIP file using this command:\e[0m"
             echo "scp /local/path/to/project.zip $USERNAME@$SERVER_IP:/home/$USERNAME/project.zip"
