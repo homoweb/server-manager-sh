@@ -72,16 +72,57 @@ deploy_site() {
     read -p "Enter domain (e.g., example.com): " DOMAIN
     read -p "Enter system username for isolation: " USERNAME
     
-    # Create user
+    # Create user and handle SSH authentication
     if id "$USERNAME" &>/dev/null; then
         echo -e "\e[33mUser '$USERNAME' already exists. Using existing user.\e[0m"
     else
         useradd -m -s /bin/bash "$USERNAME"
         echo -e "\e[32mUser '$USERNAME' created.\e[0m"
+        
+        echo "Select SSH authentication method for $USERNAME:"
+        echo "1) Password"
+        echo "2) SSH Public Key"
+        read -p "Choice (1 or 2): " AUTH_METHOD
+
+        case $AUTH_METHOD in
+            1)
+                read -s -p "Enter password for $USERNAME: " USER_PASS
+                echo
+                read -s -p "Confirm password: " USER_PASS_CONFIRM
+                echo
+                if [[ "$USER_PASS" == "$USER_PASS_CONFIRM" ]]; then
+                    echo "$USERNAME:$USER_PASS" | chpasswd
+                    echo -e "\e[32mPassword set successfully.\e[0m"
+                    # Add override to sshd_config in case global PasswordAuthentication is disabled
+                    if ! grep -q "Match User $USERNAME" /etc/ssh/sshd_config 2>/dev/null; then
+                        echo -e "\nMatch User $USERNAME\n    PasswordAuthentication yes\n" >> /etc/ssh/sshd_config
+                        systemctl reload ssh || systemctl reload sshd
+                    fi
+                else
+                    echo -e "\e[31mPasswords do not match! You must set it manually using 'passwd $USERNAME'.\e[0m"
+                fi
+                ;;
+            2)
+                read -p "Paste the Public SSH Key (ssh-rsa ...): " SSH_KEY
+                if [[ -n "$SSH_KEY" ]]; then
+                    mkdir -p /home/"$USERNAME"/.ssh
+                    echo "$SSH_KEY" > /home/"$USERNAME"/.ssh/authorized_keys
+                    chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"/.ssh
+                    chmod 700 /home/"$USERNAME"/.ssh
+                    chmod 600 /home/"$USERNAME"/.ssh/authorized_keys
+                    echo -e "\e[32mSSH Key configured successfully for $USERNAME.\e[0m"
+                else
+                    echo -e "\e[31mNo key provided. User created without SSH credentials.\e[0m"
+                fi
+                ;;
+            *)
+                echo -e "\e[31mInvalid choice. Proceeding without SSH credential configuration.\e[0m"
+                ;;
+        esac
     fi
     
     mkdir -p /home/"$USERNAME"
-    chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"
+    chown "$USERNAME":"$USERNAME" /home/"$USERNAME"
 
     echo "Select deployment method:"
     echo "1) Git Repository"
@@ -94,10 +135,12 @@ deploy_site() {
             read -p "Enter branch (default: main): " GIT_BRANCH
             GIT_BRANCH=${GIT_BRANCH:-main}
             
-            # Clean directory for clone
-            rm -rf /home/"$USERNAME"/* /home/"$USERNAME"/.[!.]*
+            # Clean directory excluding .ssh to prevent locking out the user
+            find /home/"$USERNAME" -mindepth 1 -maxdepth 1 ! -name ".ssh" -exec rm -rf {} +
             
-            sudo -u "$USERNAME" git clone -b "$GIT_BRANCH" "$GIT_URL" /home/"$USERNAME"
+            # Clone into temporary folder to bypass non-empty directory error caused by .ssh
+            sudo -u "$USERNAME" git clone -b "$GIT_BRANCH" "$GIT_URL" /home/"$USERNAME"/.tmp_clone
+            sudo -u "$USERNAME" bash -c "shopt -s dotglob && mv /home/$USERNAME/.tmp_clone/* /home/$USERNAME/ 2>/dev/null; rmdir /home/$USERNAME/.tmp_clone"
             
             cd /home/"$USERNAME"
             if [ -f "composer.json" ]; then 
@@ -113,7 +156,7 @@ deploy_site() {
             ;;
         2)
             echo -e "\e[33mUpload your files to: /home/$USERNAME\e[0m"
-            echo "Example SCP: scp -r /local/path/* root@your_server_ip:/home/$USERNAME/"
+            echo "Example SCP: scp -r /local/path/* $USERNAME@your_server_ip:/home/$USERNAME/"
             read -p "Press Enter ONLY AFTER you have uploaded the files to continue..."
             chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"
             ;;
@@ -163,6 +206,7 @@ EOF
     
     echo -e "\e[32mSite $DOMAIN deployed. Root: /home/$USERNAME\e[0m"
 }
+
 
 
 install_ssl() {
