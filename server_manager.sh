@@ -155,13 +155,25 @@ deploy_site() {
             fi
             ;;
         2)
-            echo -e "\e[33mUpload your files to: /home/$USERNAME\e[0m"
-            echo "Example SCP: scp -r /local/path/* $USERNAME@your_server_ip:/home/$USERNAME/"
-            read -p "Press Enter ONLY AFTER you have uploaded the files to continue..."
-            chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"
-            ;;
-        *)
-            echo "Invalid choice. Proceeding without deployment."
+            # Detect public IP automatically
+            SERVER_IP=$(curl -s -4 ifconfig.me || curl -s -4 api.ipify.org || hostname -I | awk '{print $1}')
+            
+            echo -e "\n\e[33mStep 1: Upload your project's ZIP file using this command:\e[0m"
+            echo "scp /local/path/to/project.zip $USERNAME@$SERVER_IP:/home/$USERNAME/project.zip"
+            echo
+            read -p "Press Enter ONLY AFTER the upload is finished..."
+            
+            ZIP_FILE="/home/$USERNAME/project.zip"
+            if [ -f "$ZIP_FILE" ]; then
+                echo "Extracting project files..."
+                # Extract directly into /home/$USERNAME, overwriting existing files except .ssh
+                sudo -u "$USERNAME" unzip -o -q "$ZIP_FILE" -d /home/"$USERNAME"
+                rm -f "$ZIP_FILE"
+                chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"
+                echo -e "\e[32mExtraction complete and zip archive removed.\e[0m"
+            else
+                echo -e "\e[31mError: project.zip not found in /home/$USERNAME\e[0m"
+            fi
             ;;
     esac
 
