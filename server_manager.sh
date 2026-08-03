@@ -185,6 +185,20 @@ deploy_site() {
 
     esac
 
+    # Fix Permissions Automatically
+    chmod 755 "/home/$USERNAME"
+
+    if [ -d "/home/$USERNAME/$DOMAIN" ]; then
+        find "/home/$USERNAME/$DOMAIN" -type d -exec chmod 755 {} \;
+        find "/home/$USERNAME/$DOMAIN" -type f -exec chmod 644 {} \;
+        chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/$DOMAIN"
+
+        if [ -d "/home/$USERNAME/$DOMAIN/storage" ]; then
+            chmod -R 775 "/home/$USERNAME/$DOMAIN/storage"
+            chmod -R 775 "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
+        fi
+    fi
+    
     # PHP-FPM Pool
     POOL_CONF="/etc/php/8.4/fpm/pool.d/$USERNAME.conf"
     cat <<EOF > "$POOL_CONF"
@@ -469,6 +483,8 @@ show_menu() {
         6) manage_firewall ;;
         7) harden_server ;;
         8) manage_database_menu ;;
+        9) manage_cron ;;
+        10) manage_supervisor ;;
         *) echo "Invalid option." ;;
     esac
 }
