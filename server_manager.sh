@@ -55,6 +55,9 @@ install_stack() {
     
     # Certbot
     apt-get install -y certbot python3-certbot-nginx
+
+    # Set DNS For Github
+    echo -e "nameserver 10.202.10.202\nnameserver 10.202.10.102" > /etc/resolv.conf
     
     echo -e "${GREEN}Stack installed successfully.${NC}"
 }
