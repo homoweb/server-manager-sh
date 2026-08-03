@@ -155,27 +155,33 @@ deploy_site() {
             fi
             ;;
         2)
-            SERVER_IP=your_server_ip
+            # Detect IP and strictly filter for IPv4 format to avoid HTML errors
+            SERVER_IP=$(hostname -I | awk '{print $1}')
             
             echo -e "\n\e[33mStep 1: Upload your project's ZIP file using this command:\e[0m"
-            echo "scp /local/path/to/project.zip $USERNAME@$SERVER_IP:/home/$USERNAME/project.zip"
+            echo "scp /local/path/to/your-project.zip $USERNAME@$SERVER_IP:/home/$USERNAME/"
             echo
             read -p "Press Enter ONLY AFTER the upload is finished..."
             
-            ZIP_FILE="/home/$USERNAME/project.zip"
+            # Find the first .zip file in the user's home directory
+            ZIP_FILE=$(ls /home/"$USERNAME"/*.zip 2>/dev/null | head -n 1)
             DOMAIN_DIR="/home/$USERNAME/$DOMAIN"
             
-            if [ -f "$ZIP_FILE" ]; then
+            if [ -n "$ZIP_FILE" ] && [ -f "$ZIP_FILE" ]; then
+                echo -e "\e[32mFound zip file: $ZIP_FILE\e[0m"
                 echo "Extracting project files..."
+                
                 sudo -u "$USERNAME" mkdir -p "$DOMAIN_DIR"
                 sudo -u "$USERNAME" unzip -o -q "$ZIP_FILE" -d "$DOMAIN_DIR"
                 rm -f "$ZIP_FILE"
                 chown -R "$USERNAME":"$USERNAME" "$DOMAIN_DIR"
+                
                 echo -e "\e[32mExtraction complete and zip archive removed.\e[0m"
             else
-                echo -e "\e[31mError: project.zip not found in /home/$USERNAME\e[0m"
+                echo -e "\e[31mError: No .zip file found in /home/$USERNAME\e[0m"
             fi
             ;;
+
 
     esac
 
