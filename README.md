@@ -10,47 +10,41 @@ bash <(curl -s https://raw.githubusercontent.com/homoweb/server-manager-sh/main/
 ```
 پس از اولین اجرا، اسکریپت به صورت خودکار در سیستم نصب می‌شود. برای اجراهای بعدی، در هر مسیر از سرور فقط دستور زیر را وارد کنید:
 
-bash
-sudo lsm
+```bash
+sudo homoweb
+```
+
+> نکته: برای به‌روزرسانی نسخه‌ی نصب‌شده، کافی است مجدداً گزینه‌ی `1) Install to /usr/local/bin (homoweb)` را از منو اجرا کنید.
 
 ## قابلیت‌ها
 
-- **نصب پشته کامل**: Nginx, MySQL, PHP, Node.js, Composer, Git, Redis, Supervisor.
-- **استقرار خودکار سایت**: ساخت کاربر ایزوله، تنظیم Nginx و PHP-FPM Pool اختصاصی.
-- **مدیریت SSL**: دریافت خودکار گواهینامه رایگان Let's Encrypt با Certbot.
-- **امنیت (Hardening)**: تنظیم فایروال UFW، نصب Fail2ban و ایمن‌سازی SSH.
-- **بهینه‌سازی و نگهداری**: مدیریت Swap، بکاپ‌گیری هوشمند، بازیابی، تنظیم مقادیر Nginx و PHP.
+منوی اصلی اسکریپت شامل ۱۰ گزینه است:
+
+| # | گزینه | توضیح |
+|---|-------|-------|
+| 1 | Install to /usr/local/bin | نصب یا به‌روزرسانی اسکریپت به‌صورت دستور `homoweb` |
+| 2 | Change Mirror | تغییر مخازن APT به میرور `repo.abrha.net` (پشتیبانی از Ubuntu 24.04 و فرمت deb822) |
+| 3 | Install Full Stack | نصب Nginx، MySQL، PHP 8.4 (از PPA ondrej)، Node.js 20، Composer، Redis، Supervisor، UFW و Fail2ban |
+| 4 | Deploy Site | استقرار سایت با کاربر ایزوله، PHP-FPM Pool اختصاصی و Vhost آماده‌ی لاراول؛ دیپلوی از Git یا فایل ZIP |
+| 5 | Install SSL | دریافت گواهینامه رایگان Let's Encrypt با Certbot |
+| 6 | Manage Firewall | فعال‌سازی UFW با قوانین آماده و باز/بستن پورت دلخواه |
+| 7 | Harden Server | بستن لاگین root و غیرفعال‌کردن احراز هویت رمز عبور در SSH |
+| 8 | Manage DB | ساخت/لیست/حذف دیتابیس، ساخت یوزر و تغییر رمز عبور MySQL |
+| 9 | Manage Cron | مدیریت کران‌جاب هر یوزر (لیست/افزودن/حذف) |
+| 10 | Manage Supervisor | مدیریت پردازش‌ها و ورکرهای Supervisor (لیست/افزودن/حذف) |
+
+### جزئیات استقرار سایت (گزینه 4)
+
+- ساخت کاربر سیستمی ایزوله به همراه پیکربندی SSH (رمز عبور یا کلید عمومی)
+- دیپلوی خودکار از مخزن Git: اجرای `composer install --no-dev`، `npm run build` و برای لاراول ساخت `.env` و اجرای `key:generate`
+- یا دیپلوی دستی با فایل ZIP (نمایش دستور آماده‌ی `scp` برای آپلود)
+- تنظیم خودکار پرمیژن‌ها (`755`/`644` و `storage` + `bootstrap/cache` روی `775`)
+- ساخت PHP-FPM Pool اختصاصی با سوکت یونیکس جداگانه برای هر کاربر
+- ساخت Nginx Vhost آماده‌ی لاراول به همراه هدرهای امنیتی
 
 ## پیش‌نیازها
 
 - اوبونتو 20.04 / 22.04 / 24.04
 - دسترسی `root`
 
-
----
-
-محل قرارگیری `install_to_bin` در فایل `server_manager.sh`:
-
-۱. تابع را در بالای اسکریپت، بعد از بررسی دسترسی `root` و قبل از سایر توابع تعریف کن:
-
-```bash
-#!/bin/bash
-
-# Check root
-if [ "$EUID" -ne 0 ]; then
-  echo "Please run as root"
-  exit
-fi
-
-install_to_bin() {
-    if [ ! -f /usr/local/bin/lsm ]; then
-        curl -s https://raw.githubusercontent.com/homoweb/server-manager-sh/main/server_manager.sh > /usr/local/bin/lsm
-        chmod +x /usr/local/bin/lsm
-        echo "دستور lsm برای اجرای سریع به سیستم اضافه شد."
-    fi
-}
-
-# فراخوانی تابع برای نصب خودکار در اولین اجرا
-install_to_bin
-
-# ... ادامه کدهای اسکریپت و منوی اصلی ...
+> نکته امنیتی: هنگام استقرار سایت (گزینه ۴)، ترجیحاً روش **SSH Public Key** را انتخاب کنید تا پس از فعال‌سازی گزینه‌ی ۷ (Hardening)، دسترسی SSH شما حفظ شود.
