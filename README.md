@@ -36,7 +36,7 @@ sudo pushit
 | 1 | 📥 Install to /usr/local/bin | نصب/به‌روزرسانی اسکریپت به‌صورت دستور سراسری `pushit` |
 | 2 | 🔁 Change Mirror | سوئیچ مخازن APT به میرور داخلی `repo.abrha.net` (با پشتیبانی از فرمت deb822 در Ubuntu 24.04) |
 | 3 | 🧱 Install Full Stack | نصب کامل: Nginx، MySQL، PHP 8.4، Node.js 22، Composer، Redis، Supervisor، UFW، Fail2ban و Certbot |
-| 4 | 🌐 Deploy Site | استقرار سایت با کاربر ایزوله، PHP-FPM Pool اختصاصی و Vhost آماده‌ی Laravel — از Git یا ZIP |
+| 4 | 🌐 Manage Sites | استقرار سایت جدید (کاربر ایزوله + PHP-FPM Pool اختصاصی، از Git یا ZIP) یا حذف کامل سایت موجود |
 | 5 | 🔐 Install SSL | صدور گواهینامه‌ی رایگان Let's Encrypt با یک ورودی ساده؛ تمدید خودکار (certbot timer) |
 | 6 | 🛡️ Manage Firewall | فعال‌سازی UFW با قوانین پیش‌فرض و باز/بستن هر پورت |
 | 7 | 🔒 Harden Server | بستن لاگین مستقیم root و غیرفعال‌کردن ورود با رمز عبور در SSH (به‌همراه گارد ضد قفل‌شدگی) |
@@ -48,6 +48,10 @@ sudo pushit
 
 ```
 sudo pushit  →  4
+--- Site Management ---
+1) Create Site (Deploy)
+2) Delete Site
+
 Domain  : example.com
 Username: ali
 SSH     : 1) Password    2) Public Key
@@ -69,6 +73,15 @@ Deploy  : 1) Git Repo    2) ZIP Upload
 **۵) PHP-FPM Pool اختصاصی** — سوکت یونیکس جداگانه برای هر کاربر (`/run/php/php8.4-fpm-<user>.sock`)؛ اشباع منابع یک سایت، سایت‌های دیگر را درگیر نمی‌کند.
 
 **۶) Vhost آماده‌ی Laravel** — روت روی `public`، هدرهای امنیتی (`X-Frame-Options`، `nosniff` و…) و مسدودسازی فایل‌های مخفی به‌جز `.well-known`.
+
+## 🗑️ حذف سایت (گزینه ۴ ← Delete Site)
+
+پاک‌سازی کامل و امن یک سایت فقط با وارد کردن دامنه — با تأیید دوباره (تایپ مجدد دامنه) قبل از هر تغییری:
+
+1. کاربر ایزوله به‌صورت خودکار از روی خط `root` داخل Vhost شناسایی می‌شود (در صورت نیاز دستی پرسیده می‌شود).
+2. **همیشه حذف می‌شود:** Vhost + سیم‌لینک `sites-enabled` (با ریلود Nginx) و فایل‌های سایت `/home/<user>/<domain>`.
+3. **اختیاری (y/n):** حذف گواهینامه‌ی SSL آن دامنه (`certbot delete`).
+4. **اختیاری (y/n):** حذف کاربر ایزوله به‌همراه PHP-FPM Pool، کران‌جاب‌ها، پروسه‌های باقی‌مانده و هوم دایرکتوری — فقط زمانی که هیچ سایت دیگری از آن کاربر استفاده نکند؛ در غیر این صورت کاربر حفظ می‌شود و فقط سایت حذف می‌شود.
 
 ## 🧱 استک نصب‌شده (گزینه ۳)
 

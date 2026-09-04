@@ -342,6 +342,111 @@ EOF
 
 
 
+manage_sites() {
+    while true; do
+        echo -e "\n--- Site Management ---"
+        echo "1) Create Site (Deploy via Git or ZIP)"
+        echo "2) Delete Site"
+        echo "0) Back"
+        read -r -p "Choice: " SITE_CHOICE
+        case $SITE_CHOICE in
+            1) deploy_site ;;
+            2) delete_site ;;
+            0) break ;;
+            *) echo -e "\e[31mInvalid choice.\e[0m" ;;
+        esac
+    done
+}
+
+delete_site() {
+    read -r -p "Enter domain to delete (e.g., example.com): " DOMAIN
+    if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]]; then
+        echo -e "${RED}Invalid domain format: '$DOMAIN'${NC}"
+        return 1
+    fi
+
+    VHOST_CONF="/etc/nginx/sites-available/$DOMAIN"
+    if [ ! -f "$VHOST_CONF" ]; then
+        echo -e "${RED}No Nginx vhost found for '$DOMAIN'. Nothing to delete.${NC}"
+        return 1
+    fi
+
+    # Detect the isolated user from the vhost root directive: root /home/<user>/<domain>/public;
+    USERNAME=$(sed -n 's/^[[:space:]]*root \/home\/\([^/]*\)\/.*/\1/p' "$VHOST_CONF" | head -n 1)
+    if [ -z "$USERNAME" ]; then
+        read -r -p "Could not detect the isolated user from the vhost. Enter username: " USERNAME
+        if ! [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+            echo -e "${RED}Invalid username: '$USERNAME'.${NC}"
+            return 1
+        fi
+    fi
+
+    SITE_DIR="/home/$USERNAME/$DOMAIN"
+    POOL_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/$USERNAME.conf"
+
+    echo -e "\n\e[33mThe following will be deleted:\e[0m"
+    echo "  - Nginx vhost  : $VHOST_CONF (+ sites-enabled symlink)"
+    echo "  - Site files   : $SITE_DIR"
+    [ -f "$POOL_CONF" ] && echo "  - PHP-FPM pool : $POOL_CONF (only if no other site uses '$USERNAME')"
+
+    read -r -p "Also delete the SSL certificate for '$DOMAIN' (certbot)? (y/n): " DEL_CERT
+    read -r -p "Also delete the isolated user '$USERNAME' and its home directory? (y/n): " DEL_USER
+    read -r -p "Type the domain name again to confirm: " DEL_CONFIRM
+    if [ "$DEL_CONFIRM" != "$DOMAIN" ]; then
+        echo -e "${RED}Confirmation does not match. Aborted. Nothing was deleted.${NC}"
+        return 1
+    fi
+
+    # 1) Nginx vhost
+    rm -f "$VHOST_CONF" "/etc/nginx/sites-enabled/$DOMAIN"
+    systemctl reload nginx
+    echo -e "\e[32mNginx vhost removed.\e[0m"
+
+    # 2) SSL certificate (optional)
+    if [[ "$DEL_CERT" =~ ^[yY] ]]; then
+        if certbot certificates 2>/dev/null | grep -q "Certificate Name: $DOMAIN"; then
+            if certbot delete --cert-name "$DOMAIN" --non-interactive; then
+                echo -e "\e[32mSSL certificate for '$DOMAIN' deleted.\e[0m"
+            else
+                echo -e "${YELLOW}Certbot deletion failed. Run it manually: certbot delete --cert-name $DOMAIN${NC}"
+            fi
+        else
+            echo -e "${YELLOW}No certbot certificate found for '$DOMAIN'.${NC}"
+        fi
+    fi
+
+    # 3) Site files
+    rm -rf "$SITE_DIR"
+    echo -e "\e[32mSite files removed: $SITE_DIR\e[0m"
+
+    # 4) Isolated user + FPM pool (only when no other vhost still uses this home directory)
+    if [[ "$DEL_USER" =~ ^[yY] ]]; then
+        if grep -rq "/home/$USERNAME/" /etc/nginx/sites-available/ 2>/dev/null; then
+            echo -e "${YELLOW}Other sites still use user '$USERNAME'. User, pool and crontab were kept.${NC}"
+        else
+            if [ -f "$POOL_CONF" ]; then
+                rm -f "$POOL_CONF"
+                systemctl restart "php${PHP_VERSION}-fpm"
+                echo -e "\e[32mPHP-FPM pool removed.\e[0m"
+            fi
+            # Kill leftover processes (e.g. queue workers) so userdel does not fail
+            pkill -u "$USERNAME" 2>/dev/null || true
+            sleep 1
+            crontab -r -u "$USERNAME" 2>/dev/null || true
+            if userdel -r "$USERNAME" 2>/dev/null; then
+                echo -e "\e[32mUser '$USERNAME' and its home directory removed.\e[0m"
+            else
+                echo -e "${YELLOW}Could not fully remove user '$USERNAME'. Verify with: id $USERNAME${NC}"
+            fi
+            if grep -rls "^user=$USERNAME$" /etc/supervisor/conf.d/ 2>/dev/null; then
+                echo -e "${YELLOW}Note: supervisor configs still reference '$USERNAME'. Remove them from menu 10 if no longer needed.${NC}"
+            fi
+        fi
+    fi
+
+    echo -e "\e[32mSite '$DOMAIN' fully deleted.\e[0m"
+}
+
 install_ssl() {
     read -r -p "Enter domain: " DOMAIN
     if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]]; then
@@ -717,7 +822,7 @@ show_menu() {
     echo "1) Install to /usr/local/bin (pushit)"
     echo "2) Change Mirror (repo.abrha.net)"
     echo "3) Install Full Stack (Nginx, PHP ${PHP_VERSION}, MySQL, Redis, Node)"
-    echo "4) Deploy Site (User Isolation + FPM Pool)"
+    echo "4) Manage Sites (Deploy / Delete)"
     echo "5) Install SSL (Certbot)"
     echo "6) Manage Firewall (UFW)"
     echo "7) Harden Server (SSH)"
@@ -730,7 +835,7 @@ show_menu() {
         1) install_to_bin ;;
         2) change_mirror ;;
         3) install_stack ;;
-        4) deploy_site ;;
+        4) manage_sites ;;
         5) install_ssl ;;
         6) manage_firewall ;;
         7) harden_server ;;
