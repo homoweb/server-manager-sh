@@ -24,7 +24,7 @@ check_root() {
 }
 
 install_to_bin() {
-    curl -fsSL https://raw.githubusercontent.com/pushit/server-manager-sh/main/server_manager.sh -o /usr/local/bin/pushit \
+    curl -fsSL https://raw.githubusercontent.com/homoweb/server-manager-sh/main/server_manager.sh -o /usr/local/bin/pushit \
         && chmod +x /usr/local/bin/pushit \
         && echo -e "${GREEN}Script installed/updated. Run 'sudo pushit' from anywhere.${NC}" \
         || echo -e "${RED}Installation failed. Check your internet connection and try again.${NC}"

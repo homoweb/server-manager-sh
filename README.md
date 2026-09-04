@@ -18,7 +18,7 @@
 در سرور اوبونتو فقط همین یک دستور را اجرا کنید:
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/pushit/server-manager-sh/main/server_manager.sh)
+bash <(curl -s https://raw.githubusercontent.com/homoweb/server-manager-sh/main/server_manager.sh)
 ```
 
 اسکریپت دانلود و اجرا می‌شود و در پایان به‌صورت خودکار در مسیر `/usr/local/bin/pushit` نصب می‌شود. از این به بعد در هر مسیری از سرور کافی است بنویسید:
