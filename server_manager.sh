@@ -386,6 +386,98 @@ harden_server() {
     echo -e "${YELLOW}IMPORTANT: Keep this session open and test a new SSH login before closing it!${NC}"
 }
 
+download_database() {
+    if ! command -v mysqldump > /dev/null 2>&1; then
+        echo -e "${RED}'mysqldump' not found. Install it first: apt-get install -y mysql-client${NC}"
+        return 1
+    fi
+
+    echo -e "\n--- Existing Databases ---"
+    mysql -e "SHOW DATABASES;" | grep -Ev "^(Database|information_schema|performance_schema|mysql|sys)$"
+    echo ""
+    read -r -p "Enter Database Name to download: " db_name
+    if ! [[ "$db_name" =~ ^[A-Za-z0-9_]+$ ]]; then
+        echo -e "${RED}Invalid database name.${NC}"
+        return 1
+    fi
+    if ! mysql -N -e "SHOW DATABASES LIKE '${db_name}';" | grep -q .; then
+        echo -e "${RED}Database '${db_name}' not found.${NC}"
+        return 1
+    fi
+
+    BACKUP_DIR="${PUSHIT_DB_BACKUP_DIR:-/root/db-backups}"
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    DUMP_FILE="${BACKUP_DIR}/${db_name}_${TIMESTAMP}.sql.gz"
+    mkdir -p "$BACKUP_DIR"
+
+    echo -e "${YELLOW}Dumping '${db_name}'... This may take a while for large databases.${NC}"
+    if (set -o pipefail; mysqldump --single-transaction --routines --triggers --events --hex-blob "${db_name}" | gzip > "$DUMP_FILE"); then
+        chmod 600 "$DUMP_FILE"
+        SERVER_IP=$(hostname -I | awk '{print $1}')
+        echo -e "${GREEN}Backup created: ${DUMP_FILE} ($(du -h "$DUMP_FILE" | cut -f1))${NC}"
+        echo -e "\n${YELLOW}Download it to your local machine with this command:${NC}"
+        echo "scp root@${SERVER_IP}:${DUMP_FILE} ./"
+    else
+        rm -f "$DUMP_FILE"
+        echo -e "${RED}Dump failed. No backup file was kept.${NC}"
+        return 1
+    fi
+}
+
+upload_database() {
+    SERVER_IP=$(hostname -I | awk '{print $1}')
+    echo -e "${YELLOW}Step 1: Upload your backup file to this server with a command like:${NC}"
+    echo "scp ./backup.sql.gz root@${SERVER_IP}:/root/"
+    echo ""
+    read -r -p "Enter path of the SQL file on this server (e.g., /root/backup.sql or /root/backup.sql.gz): " SQL_FILE
+    if [ ! -f "$SQL_FILE" ]; then
+        echo -e "${RED}File not found: '${SQL_FILE}'${NC}"
+        return 1
+    fi
+
+    read -r -p "Enter target Database Name: " db_name
+    if ! [[ "$db_name" =~ ^[A-Za-z0-9_]+$ ]]; then
+        echo -e "${RED}Invalid database name.${NC}"
+        return 1
+    fi
+
+    if ! mysql -N -e "SHOW DATABASES LIKE '${db_name}';" | grep -q .; then
+        read -r -p "Database '${db_name}' does not exist. Create it now? (y/n): " CREATE_ANS
+        case $CREATE_ANS in
+            [yY]*)
+                mysql -e "CREATE DATABASE \`${db_name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+                echo -e "${GREEN}Database '${db_name}' created.${NC}"
+                ;;
+            *)
+                echo -e "${RED}Aborted: target database does not exist.${NC}"
+                return 1
+                ;;
+        esac
+    fi
+
+    echo -e "${YELLOW}Importing '${SQL_FILE}' into '${db_name}'... This may take a while.${NC}"
+    case "$SQL_FILE" in
+        *.gz)
+            if (set -o pipefail; gunzip -c "$SQL_FILE" | mysql "${db_name}"); then
+                echo -e "${GREEN}Success: '${SQL_FILE}' imported into '${db_name}'.${NC}"
+            else
+                echo -e "${RED}Import failed. Check the dump file and try again.${NC}"
+                return 1
+            fi
+            ;;
+        *)
+            if mysql "${db_name}" < "$SQL_FILE"; then
+                echo -e "${GREEN}Success: '${SQL_FILE}' imported into '${db_name}'.${NC}"
+            else
+                echo -e "${RED}Import failed. Check the dump file and try again.${NC}"
+                return 1
+            fi
+            ;;
+    esac
+    TABLE_COUNT=$(mysql -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${db_name}';")
+    echo -e "${GREEN}'${db_name}' now contains ${TABLE_COUNT} table(s).${NC}"
+}
+
 manage_database_menu() {
     while true; do
         echo -e "\n--- Database Management ---"
@@ -393,6 +485,8 @@ manage_database_menu() {
         echo "2) List Databases"
         echo "3) Delete Database"
         echo "4) Change Database User Password"
+        echo "5) Download Database (Backup)"
+        echo "6) Upload / Restore Database"
         echo "0) Back to Main Menu"
         read -r -p "Select an option: " db_choice
 
@@ -453,6 +547,8 @@ manage_database_menu() {
                     echo -e "\e[31mError: User and password are required.\e[0m"
                 fi
                 ;;
+            5) download_database ;;
+            6) upload_database ;;
             0)
                 break
                 ;;
