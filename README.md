@@ -60,6 +60,8 @@ Deploy  : 1) Git Repo    2) ZIP Upload
 **۲) دیپلوی خودکار از Git** — کلون از برنچ دلخواه و سپس در صورت وجود:
 `composer install --no-dev --optimize-autoloader`، `npm install && npm run build` و برای Laravel ساخت `.env` از روی `.env.example` و اجرای `php artisan key:generate`.
 
+> 🔑 **ریپوی خصوصی؟** وقتی git نام کاربری و رمز می‌پرسد، به‌جای پسورد اکانت باید یک **Personal Access Token** بدهید (GitHub ← Settings ← Developer settings ← Tokens)؛ گیت‌هاب از سال ۲۰۲۱ پسورد اکانت را برای عملیات Git قبول نمی‌کند. اگر کلون شکست بخورد، دیپلوی با پیام راهنما متوقف می‌شود و فایل‌های قبلی سایت دست‌نخورده می‌مانند.
+
 **۳) دیپلوی با ZIP** — نمایش دستور آماده‌ی `scp` برای آپلود، اکسترکت خودکار به `/home/<user>/<domain>` و پاک‌کردن آرشیو بعد از اتمام.
 
 **۴) پرمیژن‌های امن** — پوشه‌ها `755`، فایل‌ها `644` و `storage` + `bootstrap/cache` روی `775`.
@@ -108,6 +110,7 @@ scp ./backup.sql.gz root@SERVER_IP:/root/
 | Composer نصب نشد | ابتدا گزینه ۳ را کامل اجرا کنید تا PHP CLI موجود باشد |
 | خطا در دانلود پکیج‌ها | با گزینه ۲ مخازن را دوباره تنظیم کنید |
 | مطمئن نیستم تمدید خودکار SSL فعال است | با `certbot renew --dry-run` تست کنید و `systemctl list-timers \| grep certbot` را بررسی کنید |
+| کلون گیت‌هاب خطای `Authentication failed` می‌دهد | برای ریپوی خصوصی به‌جای پسورد اکانت از Personal Access Token استفاده کنید و نام برنچ (main/master) را چک کنید |
 
 ## 📋 پیش‌نیازها
 

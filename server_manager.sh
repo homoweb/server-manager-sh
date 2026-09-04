@@ -197,14 +197,25 @@ deploy_site() {
             fi
             read -r -p "Enter branch (default: main): " GIT_BRANCH
             GIT_BRANCH=${GIT_BRANCH:-main}
-            
-            # Clean directory excluding .ssh to prevent locking out the user
-            find /home/"$USERNAME" -mindepth 1 -maxdepth 1 ! -name ".ssh" -exec rm -rf {} +
-            
-            # Clone into temporary folder to bypass non-empty directory error caused by .ssh
-            sudo -u "$USERNAME" git clone -b "$GIT_BRANCH" "$GIT_URL" /home/"$USERNAME"/.tmp_clone
-            sudo -u "$USERNAME" bash -c "shopt -s dotglob && mv /home/$USERNAME/.tmp_clone/* /home/$USERNAME/ 2>/dev/null; rmdir /home/$USERNAME/.tmp_clone"
-            
+
+            # Clone into temporary folder FIRST so a failed clone
+            # does not wipe the existing site directory
+            rm -rf /home/"$USERNAME"/.tmp_clone
+            if sudo -u "$USERNAME" git clone -b "$GIT_BRANCH" "$GIT_URL" /home/"$USERNAME"/.tmp_clone; then
+                # Clean directory excluding .ssh and .tmp_clone to prevent locking out the user
+                find /home/"$USERNAME" -mindepth 1 -maxdepth 1 ! -name ".ssh" ! -name ".tmp_clone" -exec rm -rf {} +
+                sudo -u "$USERNAME" bash -c "shopt -s dotglob && mv /home/$USERNAME/.tmp_clone/* /home/$USERNAME/ 2>/dev/null; rmdir /home/$USERNAME/.tmp_clone"
+            else
+                rm -rf /home/"$USERNAME"/.tmp_clone
+                echo -e "${RED}Git clone failed! Nothing was deployed and your existing files were not modified.${NC}"
+                echo -e "${YELLOW}Possible causes:${NC}"
+                echo -e "${YELLOW}  1) Private repo: when git asks for the password, you must use a GitHub Personal Access Token${NC}"
+                echo -e "${YELLOW}     (GitHub > Settings > Developer settings > Tokens). Account passwords are NOT accepted by GitHub.${NC}"
+                echo -e "${YELLOW}  2) Branch '$GIT_BRANCH' does not exist - the default branch might be 'master'.${NC}"
+                echo -e "${YELLOW}  3) Wrong URL or no network access to the Git server.${NC}"
+                return 1
+            fi
+
             cd /home/"$USERNAME" || return 1
             if [ -f "composer.json" ]; then 
                 sudo -u "$USERNAME" composer install --no-dev --optimize-autoloader
@@ -243,9 +254,10 @@ deploy_site() {
                 echo -e "\e[31mError: No .zip file found in /home/$USERNAME\e[0m"
             fi
             ;;
-
-
-
+        *)
+            echo -e "${RED}Invalid deployment method. Nothing was deployed; no changes were made to Nginx/PHP.${NC}"
+            return 1
+            ;;
     esac
 
     # Fix Permissions Automatically
