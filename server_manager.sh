@@ -200,10 +200,92 @@ deploy_site() {
             read -r -p "Enter branch (default: main): " GIT_BRANCH
             GIT_BRANCH=${GIT_BRANCH:-main}
 
+            echo "Repository access:"
+            echo "1) Public repository"
+            echo "2) Private - Personal Access Token (HTTPS, input hidden, nothing is stored)"
+            echo "3) Private - SSH Deploy Key (recommended; future 'git pull' works too)"
+            read -r -p "Choice (1/2/3, default 1): " GIT_AUTH
+            GIT_AUTH=${GIT_AUTH:-1}
+
+            CLONE_ENV=()
+            ASKPASS=""
+            case $GIT_AUTH in
+                2)
+                    read -r -p "Git username (e.g., your GitHub username; Enter = git): " GIT_USER
+                    GIT_USER=${GIT_USER:-git}
+                    read -r -s -p "Personal Access Token (input hidden): " GIT_TOKEN
+                    echo
+                    if [ -z "$GIT_TOKEN" ]; then
+                        echo -e "${RED}No token provided. Nothing was deployed.${NC}"
+                        return 1
+                    fi
+                    # Generic askpass helper: git reads the credentials from these env vars,
+                    # so the token never touches the disk and never lands in .git/config
+                    ASKPASS="/home/$USERNAME/.askpass_tmp"
+                    cat > "$ASKPASS" <<'EOF'
+#!/bin/sh
+case "$1" in
+    Username*) echo "$GIT_USER" ;;
+    *) echo "$GIT_TOKEN" ;;
+esac
+EOF
+                    chown "$USERNAME":"$USERNAME" "$ASKPASS"
+                    chmod 700 "$ASKPASS"
+                    CLONE_ENV=("GIT_ASKPASS=$ASKPASS" "GIT_TERMINAL_PROMPT=0" "GIT_USER=$GIT_USER" "GIT_TOKEN=$GIT_TOKEN")
+                    ;;
+                3)
+                    # Deploy keys require an SSH remote; convert a GitHub HTTPS URL automatically
+                    if [[ "$GIT_URL" =~ ^https://github\.com/ ]]; then
+                        REPO_PATH=${GIT_URL#https://github.com/}
+                        REPO_PATH=${REPO_PATH%.git}
+                        GIT_URL="git@github.com:${REPO_PATH}.git"
+                        echo -e "${YELLOW}URL converted to: $GIT_URL${NC}"
+                    fi
+                    if ! echo "$GIT_URL" | grep -Eq '^(git@|ssh://)'; then
+                        echo -e "${RED}Deploy keys require an SSH URL (e.g., git@github.com:user/repo.git).${NC}"
+                        return 1
+                    fi
+                    sudo -u "$USERNAME" mkdir -p /home/"$USERNAME"/.ssh
+                    chmod 700 /home/"$USERNAME"/.ssh
+                    if [ ! -f /home/"$USERNAME"/.ssh/id_ed25519 ]; then
+                        sudo -u "$USERNAME" ssh-keygen -t ed25519 -N "" -f /home/"$USERNAME"/.ssh/id_ed25519 -q
+                        echo -e "\e[32mDeploy key generated.\e[0m"
+                    fi
+                    echo -e "\n\e[33mAdd this deploy key on GitHub (repo > Settings > Deploy keys > Add deploy key; Read-only is enough):\e[0m"
+                    cat /home/"$USERNAME"/.ssh/id_ed25519.pub
+                    read -r -p "Press Enter ONLY AFTER the deploy key is added..."
+                    sudo -u "$USERNAME" bash -c "ssh-keyscan -t ed25519,rsa github.com >> /home/$USERNAME/.ssh/known_hosts 2>/dev/null"
+                    if echo "$GIT_URL" | grep -q "github.com"; then
+                        SSH_TEST=$(sudo -u "$USERNAME" ssh -i /home/"$USERNAME"/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new -T git@github.com 2>&1 || true)
+                        if echo "$SSH_TEST" | grep -q "successfully authenticated"; then
+                            echo -e "\e[32mDeploy key verified for GitHub.\e[0m"
+                        else
+                            echo -e "${RED}Deploy key verification failed:${NC}"
+                            echo "$SSH_TEST"
+                            echo -e "${YELLOW}Add the key (repo > Settings > Deploy keys) and re-run this deployment.${NC}"
+                            return 1
+                        fi
+                    fi
+                    CLONE_ENV=("GIT_SSH_COMMAND=ssh -i /home/$USERNAME/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new")
+                    ;;
+                *)
+                    if [ "$GIT_AUTH" != "1" ]; then
+                        echo -e "${RED}Invalid choice.${NC}"
+                        return 1
+                    fi
+                    ;;
+            esac
+
             # Clone into temporary folder FIRST so a failed clone
             # does not wipe the existing site directory
             rm -rf /home/"$USERNAME"/.tmp_clone
-            if sudo -u "$USERNAME" git clone -b "$GIT_BRANCH" "$GIT_URL" /home/"$USERNAME"/.tmp_clone; then
+            CLONE_SUCCEEDED=0
+            if sudo -u "$USERNAME" env "${CLONE_ENV[@]}" git clone -b "$GIT_BRANCH" "$GIT_URL" /home/"$USERNAME"/.tmp_clone; then
+                CLONE_SUCCEEDED=1
+            fi
+            # Remove the temporary askpass helper if one was created
+            [ -f "$ASKPASS" ] && rm -f "$ASKPASS"
+            if [ "$CLONE_SUCCEEDED" -eq 1 ]; then
                 # Clean home directory excluding .ssh and .tmp_clone to prevent locking out the user
                 find /home/"$USERNAME" -mindepth 1 -maxdepth 1 ! -name ".ssh" ! -name ".tmp_clone" -exec rm -rf {} +
                 # Place the application inside a per-domain folder: /home/<user>/<domain>
@@ -216,8 +298,8 @@ deploy_site() {
                 rm -rf /home/"$USERNAME"/.tmp_clone
                 echo -e "${RED}Git clone failed! Nothing was deployed and your existing files were not modified.${NC}"
                 echo -e "${YELLOW}Possible causes:${NC}"
-                echo -e "${YELLOW}  1) Private repo: when git asks for the password, you must use a GitHub Personal Access Token${NC}"
-                echo -e "${YELLOW}     (GitHub > Settings > Developer settings > Tokens). Account passwords are NOT accepted by GitHub.${NC}"
+                echo -e "${YELLOW}  1) Private repo: re-run and pick access option 2 (Personal Access Token)${NC}"
+                echo -e "${YELLOW}     or 3 (SSH Deploy key); account passwords are NOT accepted by GitHub.${NC}"
                 echo -e "${YELLOW}  2) Branch '$GIT_BRANCH' does not exist - the default branch might be 'master'.${NC}"
                 echo -e "${YELLOW}  3) Wrong URL or no network access to the Git server.${NC}"
                 return 1

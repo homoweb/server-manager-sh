@@ -56,6 +56,7 @@ Domain  : example.com
 Username: ali
 SSH     : 1) Password    2) Public Key
 Deploy  : 1) Git Repo    2) ZIP Upload
+Access  : 1) Public    2) PAT (HTTPS)    3) Deploy Key (SSH)
 ✅ Site live at /home/ali/example.com/public
 ```
 
@@ -64,7 +65,10 @@ Deploy  : 1) Git Repo    2) ZIP Upload
 **۲) دیپلوی خودکار از Git** — کلون از برنچ دلخواه در مسیر `/home/<user>/<domain>` (هم‌راستا با دیپلوی ZIP) و سپس در صورت وجود:
 `composer install --no-dev --optimize-autoloader`، `npm install && npm run build` و برای Laravel ساخت `.env` از روی `.env.example` و اجرای `php artisan key:generate`.
 
-> 🔑 **ریپوی خصوصی؟** وقتی git نام کاربری و رمز می‌پرسد، به‌جای پسورد اکانت باید یک **Personal Access Token** بدهید (GitHub ← Settings ← Developer settings ← Tokens)؛ گیت‌هاب از سال ۲۰۲۱ پسورد اکانت را برای عملیات Git قبول نمی‌کند. اگر کلون شکست بخورد، دیپلوی با پیام راهنما متوقف می‌شود و فایل‌های قبلی سایت دست‌نخورده می‌مانند.
+> 🔑 **ریپوی خصوصی؟** بعد از وارد کردن URL و برنچ، مرحله‌ی **Repository access** نمایش داده می‌شود:
+> **۱) Public** — کلون مستقیم. **۲) Personal Access Token** — توکن با ورودی مخفی پرسیده می‌شود (از طریق `GIT_ASKPASS`) و در هیچ فایلی — حتی `.git/config` — ذخیره نمی‌شود. **۳) SSH Deploy Key** (روش پیشنهادی) — کلید `ed25519` خودکار ساخته و کلید عمومی نمایش داده می‌شود؛ آن را در GitHub ← repo ← Settings ← Deploy keys اضافه کنید (Read-only کافی است). URL هم خودکار به فرمت SSH تبدیل می‌شود، اتصال قبل از کلون تأیید می‌شود و `git pull`های بعدی کاربر هم بدون رمز کار می‌کند.
+>
+> 🚫 گیت‌هاب از سال ۲۰۲۱ پسورد اکانت را برای عملیات Git قبول نمی‌کند؛ باید توکن یا کلید بدهید. اگر کلون شکست بخورد، دیپلوی با پیام راهنما متوقف می‌شود و فایل‌های قبلی سایت دست‌نخورده می‌مانند.
 
 **۳) دیپلوی با ZIP** — نمایش دستور آماده‌ی `scp` برای آپلود، اکسترکت خودکار به `/home/<user>/<domain>` و پاک‌کردن آرشیو بعد از اتمام.
 
@@ -125,7 +129,7 @@ scp ./backup.sql.gz root@SERVER_IP:/root/
 | Composer نصب نشد | ابتدا گزینه ۳ را کامل اجرا کنید تا PHP CLI موجود باشد |
 | خطا در دانلود پکیج‌ها | با گزینه ۲ مخازن را دوباره تنظیم کنید |
 | مطمئن نیستم تمدید خودکار SSL فعال است | با `certbot renew --dry-run` تست کنید و `systemctl list-timers \| grep certbot` را بررسی کنید |
-| کلون گیت‌هاب خطای `Authentication failed` می‌دهد | برای ریپوی خصوصی به‌جای پسورد اکانت از Personal Access Token استفاده کنید و نام برنچ (main/master) را چک کنید |
+| کلون گیت‌هاب خطای `Authentication failed` می‌دهد | پسورد اکانت گیت‌هاب هرگز پذیرفته نمی‌شود؛ در Repository access گزینه‌ی ۲ (Personal Access Token با دسترسی Contents: Read-only) یا ۳ (Deploy Key) را انتخاب کنید و نام برنچ (main/master) را چک کنید |
 
 ## 📋 پیش‌نیازها
 
