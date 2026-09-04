@@ -6,15 +6,15 @@
 
 فقط با اجرای دستور زیر در سرور اوبونتو، اسکریپت دانلود و اجرا می‌شود:
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/homoweb/server-manager-sh/main/server_manager.sh)
+bash <(curl -s https://raw.githubusercontent.com/pushit/server-manager-sh/main/server_manager.sh)
 ```
 پس از اولین اجرا، اسکریپت به صورت خودکار در سیستم نصب می‌شود. برای اجراهای بعدی، در هر مسیر از سرور فقط دستور زیر را وارد کنید:
 
 ```bash
-sudo homoweb
+sudo pushit
 ```
 
-> نکته: برای به‌روزرسانی نسخه‌ی نصب‌شده، کافی است مجدداً گزینه‌ی `1) Install to /usr/local/bin (homoweb)` را از منو اجرا کنید.
+> نکته: برای به‌روزرسانی نسخه‌ی نصب‌شده، کافی است مجدداً گزینه‌ی `1) Install to /usr/local/bin (pushit)` را از منو اجرا کنید.
 
 ## قابلیت‌ها
 
@@ -22,7 +22,7 @@ sudo homoweb
 
 | # | گزینه | توضیح |
 |---|-------|-------|
-| 1 | Install to /usr/local/bin | نصب یا به‌روزرسانی اسکریپت به‌صورت دستور `homoweb` |
+| 1 | Install to /usr/local/bin | نصب یا به‌روزرسانی اسکریپت به‌صورت دستور `pushit` |
 | 2 | Change Mirror | تغییر مخازن APT به میرور `repo.abrha.net` (پشتیبانی از Ubuntu 24.04 و فرمت deb822) |
 | 3 | Install Full Stack | نصب Nginx، MySQL، PHP 8.4 (از PPA ondrej)، Node.js 20، Composer، Redis، Supervisor، UFW و Fail2ban |
 | 4 | Deploy Site | استقرار سایت با کاربر ایزوله، PHP-FPM Pool اختصاصی و Vhost آماده‌ی لاراول؛ دیپلوی از Git یا فایل ZIP |

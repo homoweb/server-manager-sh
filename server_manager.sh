@@ -24,9 +24,9 @@ check_root() {
 }
 
 install_to_bin() {
-    curl -fsSL https://raw.githubusercontent.com/homoweb/server-manager-sh/main/server_manager.sh -o /usr/local/bin/homoweb \
-        && chmod +x /usr/local/bin/homoweb \
-        && echo -e "${GREEN}Script installed/updated. Run 'sudo homoweb' from anywhere.${NC}" \
+    curl -fsSL https://raw.githubusercontent.com/pushit/server-manager-sh/main/server_manager.sh -o /usr/local/bin/pushit \
+        && chmod +x /usr/local/bin/pushit \
+        && echo -e "${GREEN}Script installed/updated. Run 'sudo pushit' from anywhere.${NC}" \
         || echo -e "${RED}Installation failed. Check your internet connection and try again.${NC}"
 }
 
@@ -576,9 +576,9 @@ EOF
 
 
 show_menu() {
-    echo -e "\n=== Server Manager (homoweb) ==="
+    echo -e "\n=== Server Manager (pushit) ==="
     echo "0) Exit"
-    echo "1) Install to /usr/local/bin (homoweb)"
+    echo "1) Install to /usr/local/bin (pushit)"
     echo "2) Change Mirror (repo.abrha.net)"
     echo "3) Install Full Stack (Nginx, PHP ${PHP_VERSION}, MySQL, Redis, Node)"
     echo "4) Deploy Site (User Isolation + FPM Pool)"
