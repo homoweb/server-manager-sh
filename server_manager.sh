@@ -204,9 +204,14 @@ deploy_site() {
             # does not wipe the existing site directory
             rm -rf /home/"$USERNAME"/.tmp_clone
             if sudo -u "$USERNAME" git clone -b "$GIT_BRANCH" "$GIT_URL" /home/"$USERNAME"/.tmp_clone; then
-                # Clean directory excluding .ssh and .tmp_clone to prevent locking out the user
+                # Clean home directory excluding .ssh and .tmp_clone to prevent locking out the user
                 find /home/"$USERNAME" -mindepth 1 -maxdepth 1 ! -name ".ssh" ! -name ".tmp_clone" -exec rm -rf {} +
-                sudo -u "$USERNAME" bash -c "shopt -s dotglob && mv /home/$USERNAME/.tmp_clone/* /home/$USERNAME/ 2>/dev/null; rmdir /home/$USERNAME/.tmp_clone"
+                # Place the application inside a per-domain folder: /home/<user>/<domain>
+                # chown is required: mkdir above runs as root, but the mv below runs as the
+                # isolated user and would fail with "Permission denied" (silently) otherwise
+                mkdir -p "/home/$USERNAME/$DOMAIN"
+                chown "$USERNAME":"$USERNAME" "/home/$USERNAME/$DOMAIN"
+                sudo -u "$USERNAME" bash -c "shopt -s dotglob && mv /home/$USERNAME/.tmp_clone/* /home/$USERNAME/$DOMAIN/ 2>/dev/null; rmdir /home/$USERNAME/.tmp_clone"
             else
                 rm -rf /home/"$USERNAME"/.tmp_clone
                 echo -e "${RED}Git clone failed! Nothing was deployed and your existing files were not modified.${NC}"
@@ -218,7 +223,7 @@ deploy_site() {
                 return 1
             fi
 
-            cd /home/"$USERNAME" || return 1
+            cd "/home/$USERNAME/$DOMAIN" || return 1
             if [ -f "composer.json" ]; then 
                 sudo -u "$USERNAME" composer install --no-dev --optimize-autoloader
             fi
@@ -332,7 +337,7 @@ EOF
     ln -sf "$VHOST_CONF" /etc/nginx/sites-enabled/
     systemctl reload nginx
     
-    echo -e "\e[32mSite $DOMAIN deployed. Root: /home/$USERNAME\e[0m"
+    echo -e "\e[32mSite $DOMAIN deployed. Root: /home/$USERNAME/$DOMAIN\e[0m"
 }
 
 
@@ -659,7 +664,7 @@ manage_supervisor() {
             2)
                 read -r -p "Program Name (e.g., myapp-worker): " PROG_NAME
                 read -r -p "Run as User (e.g., username): " PROG_USER
-                read -r -p "Directory (e.g., /home/username): " PROG_DIR
+                read -r -p "Directory (e.g., /home/username/example.com): " PROG_DIR
                 echo -e "\e[33mExample Command:\e[0m php artisan queue:work --sleep=3 --tries=3"
                 read -r -p "Command: " PROG_CMD
                 read -r -p "Number of processes (default 1): " PROG_NUM
