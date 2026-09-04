@@ -37,7 +37,7 @@ sudo pushit
 | 2 | 🔁 Change Mirror | سوئیچ مخازن APT به میرور داخلی `repo.abrha.net` (با پشتیبانی از فرمت deb822 در Ubuntu 24.04) |
 | 3 | 🧱 Install Full Stack | نصب کامل: Nginx، MySQL، PHP 8.4، Node.js 20، Composer، Redis، Supervisor، UFW، Fail2ban و Certbot |
 | 4 | 🌐 Deploy Site | استقرار سایت با کاربر ایزوله، PHP-FPM Pool اختصاصی و Vhost آماده‌ی Laravel — از Git یا ZIP |
-| 5 | 🔐 Install SSL | صدور گواهینامه‌ی رایگان Let's Encrypt با یک ورودی ساده |
+| 5 | 🔐 Install SSL | صدور گواهینامه‌ی رایگان Let's Encrypt با یک ورودی ساده؛ تمدید خودکار (certbot timer) |
 | 6 | 🛡️ Manage Firewall | فعال‌سازی UFW با قوانین پیش‌فرض و باز/بستن هر پورت |
 | 7 | 🔒 Harden Server | بستن لاگین مستقیم root و غیرفعال‌کردن ورود با رمز عبور در SSH (به‌همراه گارد ضد قفل‌شدگی) |
 | 8 | 🗄️ Manage DB | ساخت/لیست/حذف دیتابیس، ساخت یوزر، تغییر رمز و بکاپ/ریستور (دانلود و آپلود دامپ) |
@@ -107,6 +107,7 @@ scp ./backup.sql.gz root@SERVER_IP:/root/
 | پیام `codename is not supported` هنگام نصب PHP | PPA ondrej فقط focal/jammy/noble را پشتیبانی می‌کند؛ PHP را دستی نصب و گزینه ۳ را دوباره اجرا کنید |
 | Composer نصب نشد | ابتدا گزینه ۳ را کامل اجرا کنید تا PHP CLI موجود باشد |
 | خطا در دانلود پکیج‌ها | با گزینه ۲ مخازن را دوباره تنظیم کنید |
+| مطمئن نیستم تمدید خودکار SSL فعال است | با `certbot renew --dry-run` تست کنید و `systemctl list-timers \| grep certbot` را بررسی کنید |
 
 ## 📋 پیش‌نیازها
 
