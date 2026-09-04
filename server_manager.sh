@@ -15,6 +15,8 @@ NC='\033[0m'
 
 # Single source of truth for the PHP version (packages, FPM pool and socket)
 PHP_VERSION="8.4"
+# Single source of truth for the Node.js major version (NodeSource setup script)
+NODE_VERSION="22"
 
 check_root() {
     if [ "$EUID" -ne 0 ]; then
@@ -93,8 +95,8 @@ install_stack() {
     # Nginx & MySQL
     apt-get install -y nginx mysql-server
     
-    # Node.js
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    # Node.js (re-running this option also upgrades an existing Node 20 to the version above)
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash -
     apt-get install -y nodejs
     
     # Composer (requires PHP CLI)

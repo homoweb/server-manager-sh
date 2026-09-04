@@ -9,7 +9,7 @@
 ![shell](https://img.shields.io/badge/shell-bash-4EAA25)
 ![os](https://img.shields.io/badge/ubuntu-20.04%20%7C%2022.04%20%7C%2024.04-E95420)
 ![php](https://img.shields.io/badge/PHP-8.4-777BB4)
-![stack](https://img.shields.io/badge/stack-Nginx%20%C2%B7%20MySQL%20%C2%B7%20Redis%20%C2%B7%20Node%2020-009639)
+![stack](https://img.shields.io/badge/stack-Nginx%20%C2%B7%20MySQL%20%C2%B7%20Redis%20%C2%B7%20Node%2022-009639)
 
 </div>
 
@@ -35,7 +35,7 @@ sudo pushit
 |:-:|-------|----------------------|
 | 1 | 📥 Install to /usr/local/bin | نصب/به‌روزرسانی اسکریپت به‌صورت دستور سراسری `pushit` |
 | 2 | 🔁 Change Mirror | سوئیچ مخازن APT به میرور داخلی `repo.abrha.net` (با پشتیبانی از فرمت deb822 در Ubuntu 24.04) |
-| 3 | 🧱 Install Full Stack | نصب کامل: Nginx، MySQL، PHP 8.4، Node.js 20، Composer، Redis، Supervisor، UFW، Fail2ban و Certbot |
+| 3 | 🧱 Install Full Stack | نصب کامل: Nginx، MySQL، PHP 8.4، Node.js 22، Composer، Redis، Supervisor، UFW، Fail2ban و Certbot |
 | 4 | 🌐 Deploy Site | استقرار سایت با کاربر ایزوله، PHP-FPM Pool اختصاصی و Vhost آماده‌ی Laravel — از Git یا ZIP |
 | 5 | 🔐 Install SSL | صدور گواهینامه‌ی رایگان Let's Encrypt با یک ورودی ساده؛ تمدید خودکار (certbot timer) |
 | 6 | 🛡️ Manage Firewall | فعال‌سازی UFW با قوانین پیش‌فرض و باز/بستن هر پورت |
@@ -76,9 +76,11 @@ Deploy  : 1) Git Repo    2) ZIP Upload
 |----------|------|
 | Nginx / MySQL | مخازن رسمی اوبونتو |
 | PHP 8.4 — FPM، CLI و اکستنشن‌های mysql، redis، xml، mbstring، curl، zip، gd، bcmath | PPA ondrej |
-| Node.js 20.x | NodeSource |
+| Node.js 22.x | NodeSource |
 | Composer | آخرین نسخه‌ی پایدار |
 | Redis، Supervisor، UFW، Fail2ban، Certbot | مخازن رسمی |
+
+> 💡 اگر قبلاً Node 20 با همین روش نصب شده، اجرای دوباره‌ی گزینه ۳ مخزن NodeSource را به نسخه‌ی بالا سوئیچ و Node را ارتقا می‌دهد.
 
 در پایان، DNS سرور روی `8.8.8.8` / `1.1.1.1` تنظیم و مشکل resolve هاست‌نیم در `sudo` نیز برطرف می‌شود.
 
