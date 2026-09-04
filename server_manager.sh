@@ -353,9 +353,16 @@ EOF
     chmod 755 "/home/$USERNAME"
 
     if [ -d "/home/$USERNAME/$DOMAIN" ]; then
-        find "/home/$USERNAME/$DOMAIN" -type d -exec chmod 755 {} \;
-        find "/home/$USERNAME/$DOMAIN" -type f -exec chmod 644 {} \;
+        # u=rwX,go=rX -> directories end up 755, plain files 644, and files that were
+        # ALREADY executable (node_modules/.bin, vendor/bin, artisan, ...) keep their
+        # exec bit. A blanket "chmod 644 every file" used to strip it and broke manual
+        # runs like 'npm run build' with "sh: 1: vp: Permission denied".
+        chmod -R u=rwX,go=rX "/home/$USERNAME/$DOMAIN"
         chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/$DOMAIN"
+        # Secrets must not be world-readable
+        if [ -f "/home/$USERNAME/$DOMAIN/.env" ]; then
+            chmod 600 "/home/$USERNAME/$DOMAIN/.env"
+        fi
 
         if [ -d "/home/$USERNAME/$DOMAIN/storage" ]; then
             chmod -R 775 "/home/$USERNAME/$DOMAIN/storage"
