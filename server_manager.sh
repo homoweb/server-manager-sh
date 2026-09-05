@@ -117,6 +117,16 @@ install_stack() {
     echo "nameserver 8.8.8.8" > /etc/resolv.conf
     echo "nameserver 1.1.1.1" >> /etc/resolv.conf
 
+    # Heads-up: some frontend builds need extra outbound hosts. The laravel:fonts
+    # plugin (laravel-vite-plugin) downloads @font-face CSS + woff2 files from
+    # fonts.bunny.net / fonts.googleapis.com during 'npm run build'. If these are
+    # unreachable, the build dies with "[plugin laravel:fonts] TypeError: fetch
+    # failed ... ETIMEDOUT". Once downloaded they are cached under
+    # node_modules/.cache/laravel-vite-plugin/fonts and no network is needed again.
+    echo -e "${YELLOW}Reminder: 'npm run build' for Laravel apps may need access to fonts.bunny.net / fonts.googleapis.com.${NC}"
+    echo -e "${YELLOW}If a site build later fails with '[plugin laravel:fonts] fetch failed / ETIMEDOUT',${NC}"
+    echo -e "${YELLOW}check DNS (just configured above), UFW rules and any provider-side filtering.${NC}"
+
     unset DEBIAN_FRONTEND
     echo -e "${GREEN}Stack installed successfully.${NC}"
 }
@@ -132,7 +142,10 @@ deploy_site() {
         echo -e "${RED}Invalid username: '$USERNAME'. Use lowercase letters, digits, '-' or '_' (max 32 chars).${NC}"
         return 1
     fi
-    
+    # Absolute app path, also used by the npm-build retry hint below
+    local DEPLOY_DIR
+    DEPLOY_DIR="/home/$USERNAME/$DOMAIN"
+
     # Create user and handle SSH authentication
     if id "$USERNAME" &>/dev/null; then
         echo -e "\e[33mUser '$USERNAME' already exists. Using existing user.\e[0m"
@@ -310,7 +323,31 @@ EOF
                 sudo -u "$USERNAME" composer install --no-dev --optimize-autoloader
             fi
             if [ -f "package.json" ]; then 
-                sudo -u "$USERNAME" npm install && sudo -u "$USERNAME" npm run build
+                # 'npm run build' can require internet (e.g. laravel:fonts downloads
+                # @font-face CSS/woff2 from fonts.bunny.net / fonts.googleapis.com on
+                # first run). Retry once so a single timeout does not fail the deploy.
+                if sudo -u "$USERNAME" npm install && sudo -u "$USERNAME" npm run build; then
+                    NPM_BUILD_OK=1
+                else
+                    NPM_BUILD_OK=0
+                fi
+                if [ "$NPM_BUILD_OK" -ne 1 ]; then
+                    echo -e "${RED}npm run build FAILED. The site is deployed, but assets were not built.${NC}"
+                    echo -e "${YELLOW}Most likely cause: this server cannot reach the build-time font CDNs${NC}"
+                    echo -e "${YELLOW}(${YELLOW}fonts.bunny.net / fonts.googleapis.com${NC}). First fix connectivity, then retry:${NC}"
+                    echo -e "${YELLOW}  sudo -u $USERNAME bash -c 'cd $DEPLOY_DIR && npm install && npm run build'${NC}"
+                    echo -e "${YELLOW}Note: fonts are cached in node_modules/.cache/laravel-vite-plugin/fonts,${NC}"
+                    echo -e "${YELLOW}so the retry only needs one successful round of downloads.${NC}"
+                    read -r -p "Retry the npm build now? (y/N): " RETRY_NPM
+                    if [[ "$RETRY_NPM" =~ ^[Yy]$ ]]; then
+                        if sudo -u "$USERNAME" bash -c "cd '$DEPLOY_DIR' && npm install && npm run build"; then
+                            echo -e "\e[32mnpm build succeeded on retry.\e[0m"
+                        else
+                            echo -e "${RED}npm build failed again. Deploy the rest first, fix connectivity${NC}"
+                            echo -e "${RED}(DNS/firewall), then run the command above manually.${NC}"
+                        fi
+                    fi
+                fi
             fi
             if [ -f "artisan" ]; then
                 sudo -u "$USERNAME" cp .env.example .env

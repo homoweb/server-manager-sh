@@ -130,6 +130,7 @@ scp ./backup.sql.gz root@SERVER_IP:/root/
 | خطا در دانلود پکیج‌ها | با گزینه ۲ مخازن را دوباره تنظیم کنید |
 | مطمئن نیستم تمدید خودکار SSL فعال است | با `certbot renew --dry-run` تست کنید و `systemctl list-timers \| grep certbot` را بررسی کنید |
 | کلون گیت‌هاب خطای `Authentication failed` می‌دهد | پسورد اکانت گیت‌هاب هرگز پذیرفته نمی‌شود؛ در Repository access گزینه‌ی ۲ (Personal Access Token با دسترسی Contents: Read-only) یا ۳ (Deploy Key) را انتخاب کنید و نام برنچ (main/master) را چک کنید |
+| در نصب سایت، `npm run build` با خطای `[plugin laravel:fonts] TypeError: fetch failed` (و `ETIMEDOUT`) شکست می‌خورد | پلاگین `laravel:fonts` موقع build، CSS و فایل‌های woff2 فونت را از `fonts.bunny.net` / `fonts.googleapis.com` دانلود می‌کند و سرور به این CDNها دسترسی ندارد. اتصال خروجی سرور، DNS (گزینه ۲) و فایروال را چک کنید؛ سپس دستور پیشنهادی خود اسکریپت را اجرا کنید: `sudo -u <user> bash -c 'cd /home/<user>/<domain> && npm install && npm run build'`. پس از یک دانلود موفق، فونت‌ها در `node_modules/.cache/laravel-vite-plugin/fonts` کش می‌شوند و buildهای بعدی بدون اینترنت کار می‌کنند. راه‌حل قطعی: در `vite.config.ts` به‌جای `bunny()`/`google()` از پکیج‌های `@fontsource/*` (که با npm install دانلود می‌شوند) استفاده کنید |
 
 ## 📋 پیش‌نیازها
 
