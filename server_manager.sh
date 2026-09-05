@@ -24,6 +24,15 @@ check_root() {
         exit 1
     fi
 }
+# Anchor the script to a guaranteed-existing directory. The deploy flow used
+# to 'cd' into /home/<user>/<domain>; when that directory was later removed
+# (Delete Site, manual cleanup, ...), the script kept standing in a deleted
+# directory and every git call died with:
+#   fatal: Unable to read current working directory: No such file or directory
+# even though the repo, branch and credentials were all fine.
+anchor_cwd() {
+    cd /root 2>/dev/null || cd /
+}
 
 install_to_bin() {
     curl -fsSL https://raw.githubusercontent.com/homoweb/server-manager-sh/main/server_manager.sh -o /usr/local/bin/pushit \
@@ -132,6 +141,10 @@ install_stack() {
 }
 
 deploy_site() {
+    # A previous action (e.g. Delete Site) may have removed the directory the
+    # script is standing in; git would then fail with "Unable to read current
+    # working directory" before even contacting the Git server.
+    anchor_cwd
     read -r -p "Enter domain (e.g., example.com): " DOMAIN
     if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]]; then
         echo -e "${RED}Invalid domain format: '$DOMAIN'${NC}"
@@ -318,15 +331,19 @@ EOF
                 return 1
             fi
 
-            cd "/home/$USERNAME/$DOMAIN" || return 1
-            if [ -f "composer.json" ]; then 
-                sudo -u "$USERNAME" composer install --no-dev --optimize-autoloader
+            # NOTE: no 'cd' into the app dir here. The script must never park its
+            # own CWD inside /home/<user>/<domain>: if that directory is later
+            # removed (Delete Site, manual cleanup, ...), the next run would
+            # fail every git call with "Unable to read current working
+            # directory". All app commands run via an explicit subshell cd.
+            if [ -f "/home/$USERNAME/$DOMAIN/composer.json" ]; then
+                sudo -u "$USERNAME" bash -c "cd '/home/$USERNAME/$DOMAIN' && composer install --no-dev --optimize-autoloader"
             fi
-            if [ -f "package.json" ]; then 
+            if [ -f "/home/$USERNAME/$DOMAIN/package.json" ]; then
                 # 'npm run build' can require internet (e.g. laravel:fonts downloads
                 # @font-face CSS/woff2 from fonts.bunny.net / fonts.googleapis.com on
                 # first run). Retry once so a single timeout does not fail the deploy.
-                if sudo -u "$USERNAME" npm install && sudo -u "$USERNAME" npm run build; then
+                if sudo -u "$USERNAME" bash -c "cd '/home/$USERNAME/$DOMAIN' && npm install && npm run build"; then
                     NPM_BUILD_OK=1
                 else
                     NPM_BUILD_OK=0
@@ -349,9 +366,8 @@ EOF
                     fi
                 fi
             fi
-            if [ -f "artisan" ]; then
-                sudo -u "$USERNAME" cp .env.example .env
-                sudo -u "$USERNAME" php artisan key:generate
+            if [ -f "/home/$USERNAME/$DOMAIN/artisan" ]; then
+                sudo -u "$USERNAME" bash -c "cd '/home/$USERNAME/$DOMAIN' && cp .env.example .env && php artisan key:generate"
             fi
             ;;
         2)
@@ -485,6 +501,8 @@ manage_sites() {
 }
 
 delete_site() {
+    # Never stand inside a directory we are about to remove
+    anchor_cwd
     read -r -p "Enter domain to delete (e.g., example.com): " DOMAIN
     if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]]; then
         echo -e "${RED}Invalid domain format: '$DOMAIN'${NC}"
