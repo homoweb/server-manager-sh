@@ -20,6 +20,10 @@ NODE_VERSION="22"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
+PUSHIT_DL_DIR="/var/lib/pushit/downloads"
+PUSHIT_DL_PORT="8787"
+PUSHIT_DL_SERVER="/usr/local/bin/pushit-dl-server.py"
+PUSHIT_DL_LOG="/var/log/pushit-dl.log"
 
 check_root() {
     if [ "$EUID" -ne 0 ]; then
@@ -175,6 +179,8 @@ pushit_uninstall() {
     echo "  - $PUSHIT_CONFIG"
     echo "  - ${PUSHIT_BIN}.bak.* (backups)"
     echo "  - /tmp/pushit.* (temp downloads)"
+    echo "  - $PUSHIT_DL_DIR (one-time links)"
+    echo "  - $PUSHIT_DL_SERVER + systemd units"
     local cur=""
     if [ -f "$0" ] && [ "$0" != "$PUSHIT_BIN" ] && head -n1 "$0" 2>/dev/null | grep -q "Server Manager"; then cur="$0"
     elif [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ] && [ "${BASH_SOURCE[0]}" != "$PUSHIT_BIN" ] && head -n1 "${BASH_SOURCE[0]}" 2>/dev/null | grep -q "Server Manager"; then cur="${BASH_SOURCE[0]}"
@@ -188,6 +194,14 @@ pushit_uninstall() {
     rm -f "$PUSHIT_CONFIG" 2>/dev/null || true
     rm -f "${PUSHIT_BIN}.bak."* 2>/dev/null || true
     rm -f /tmp/pushit.* 2>/dev/null || true
+    systemctl disable --now pushit-dl.service 2>/dev/null || true
+    systemctl disable --now pushit-dl-prune.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/pushit-dl.service /etc/systemd/system/pushit-dl-prune.service /etc/systemd/system/pushit-dl-prune.timer 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    pkill -f "$PUSHIT_DL_SERVER" 2>/dev/null || true
+    rm -rf "$PUSHIT_DL_DIR" 2>/dev/null || true
+    rm -f "$PUSHIT_DL_SERVER" "$PUSHIT_DL_LOG" 2>/dev/null || true
+    if command -v ufw >/dev/null 2>&1; then ufw delete allow "${PUSHIT_DL_PORT}/tcp" 2>/dev/null || true; fi
     hash -r 2>/dev/null || true
     if [ -n "$cur" ]; then
         read -r -p "Also remove current file '$cur'? (y/n): " RM_CUR
@@ -203,11 +217,144 @@ pushit_uninstall() {
     exit 0
 }
 
+pushit_dl_init_python_server() {
+    mkdir -p "$PUSHIT_DL_DIR" 2>/dev/null || true
+    chmod 700 "$PUSHIT_DL_DIR" 2>/dev/null || true
+    find "$PUSHIT_DL_DIR" -maxdepth 1 -name "*.meta" -mmin +30 -exec rm -f {} \; 2>/dev/null || true
+    for m in "$PUSHIT_DL_DIR"/*.meta; do
+        [ -e "$m" ] || continue
+        [ -f "$m" ] || continue
+        local tok="${m##*/}"; tok="${tok%.meta}"
+        local f="$PUSHIT_DL_DIR/$tok"
+        local exp
+        exp=$(grep -m1 "^expires=" "$m" 2>/dev/null | cut -d= -f2)
+        if [ -n "$exp" ] && [ "$(date +%s)" -ge "$exp" ]; then rm -f "$f" "$m" 2>/dev/null || true; fi
+    done 2>/dev/null || true
+    cat > "$PUSHIT_DL_SERVER" <<'PYEOF'
+#!/usr/bin/env python3
+import os, sys, time, http.server, socketserver, urllib.parse
+DL_DIR = "/var/lib/pushit/downloads"
+PORT = 8787
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        token = parsed.path.lstrip("/")
+        if not token or "/" in token or ".." in token or not token.replace("_","").replace("-","").isalnum():
+            self.send_response(400); self.end_headers(); self.wfile.write(b"Invalid token\n"); return
+        fpath = os.path.join(DL_DIR, token)
+        mpath = os.path.join(DL_DIR, token + ".meta")
+        if not os.path.isfile(fpath) or not os.path.isfile(mpath):
+            self.send_response(404); self.end_headers(); self.wfile.write(b"Not found or expired\n"); return
+        meta = {}
+        try:
+            with open(mpath) as mf:
+                for line in mf:
+                    if "=" in line: k,v=line.strip().split("=",1); meta[k]=v
+        except: pass
+        exp = int(meta.get("expires","0") or 0)
+        if exp and time.time() >= exp:
+            try: os.remove(fpath)
+            except: pass
+            try: os.remove(mpath)
+            except: pass
+            self.send_response(410); self.end_headers(); self.wfile.write(b"Link expired (30 min)\n"); return
+        fname = meta.get("filename", token)
+        fsize = os.path.getsize(fpath)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(fsize))
+        self.send_header("Content-Disposition", 'attachment; filename="%s"' % fname.replace('"',''))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        with open(fpath, "rb") as fh:
+            while True:
+                chunk = fh.read(1024*1024)
+                if not chunk: break
+                self.wfile.write(chunk)
+        try: os.remove(fpath)
+        except: pass
+        try: os.remove(mpath)
+        except: pass
+    def log_message(self, fmt, *args):
+        sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), fmt%args))
+if __name__ == "__main__":
+    os.makedirs(DL_DIR, exist_ok=True)
+    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        httpd.allow_reuse_address = True
+        httpd.serve_forever()
+PYEOF
+    chmod +x "$PUSHIT_DL_SERVER" 2>/dev/null || true
+}
+
 pushit_is_installed() {
     # Consider installed if we are already running as pushit, or binary exists
     if [ -x "$PUSHIT_BIN" ] && [ -f "$PUSHIT_BIN" ]; then return 0; fi
     if [ "$0" = "$PUSHIT_BIN" ] || [ "${BASH_SOURCE[0]:-}" = "$PUSHIT_BIN" ]; then return 0; fi
     return 1
+}
+
+pushit_dl_ensure_server() {
+    pushit_dl_init_python_server
+    if command -v ss >/dev/null 2>&1; then
+        if ss -tlnH 2>/dev/null | grep -q ":${PUSHIT_DL_PORT} "; then return 0; fi
+    elif command -v netstat >/dev/null 2>&1; then
+        if netstat -tln 2>/dev/null | grep -q ":${PUSHIT_DL_PORT} "; then return 0; fi
+    fi
+    nohup python3 "$PUSHIT_DL_SERVER" >> "$PUSHIT_DL_LOG" 2>&1 &
+    disown 2>/dev/null || true
+    if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+        cat > /etc/systemd/system/pushit-dl.service <<EOF2
+[Unit]
+Description=Pushit one-time download server
+After=network.target
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 $PUSHIT_DL_SERVER
+Restart=always
+RestartSec=5
+EOF2
+        cat > /etc/systemd/system/pushit-dl-prune.service <<EOF2
+[Unit]
+Description=Prune expired pushit downloads
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'find $PUSHIT_DL_DIR -maxdepth 1 -name "*.meta" -mmin +30 -delete; for m in $PUSHIT_DL_DIR/*.meta; do [ -f "\$m" ] || continue; exp=\$(grep -m1 "^expires=" "\$m" | cut -d= -f2); tok=\$(basename "\$m" .meta); if [ -n "\$exp" ] && [ "\$(date +%s)" -ge "\$exp" ]; then rm -f "$PUSHIT_DL_DIR/\$tok" "\$m"; fi; done'
+EOF2
+        cat > /etc/systemd/system/pushit-dl-prune.timer <<EOF2
+[Unit]
+Description=Prune expired pushit downloads every 5 min
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+[Install]
+WantedBy=timers.target
+EOF2
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable --now pushit-dl.service 2>/dev/null || true
+        systemctl enable --now pushit-dl-prune.timer 2>/dev/null || true
+    fi
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw allow "${PUSHIT_DL_PORT}/tcp" >/dev/null 2>&1 || true
+    fi
+    sleep 1
+}
+
+pushit_dl_build_url() {
+    local token="$1"
+    pushit_load_config
+    if [ "${PUSHIT_MODE:-}" = "domain" ] && [ -n "${PUSHIT_DOMAIN:-}" ]; then
+        if [ -f "/etc/letsencrypt/live/${PUSHIT_DOMAIN}/fullchain.pem" ]; then
+            echo "https://${PUSHIT_DOMAIN}:${PUSHIT_DL_PORT}/${token}"
+        else
+            echo "http://${PUSHIT_DOMAIN}:${PUSHIT_DL_PORT}/${token}"
+        fi
+    else
+        local ip="${PUSHIT_IP:-}"
+        [ -z "$ip" ] && ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+        [ -z "$ip" ] && ip=$(hostname -i 2>/dev/null | awk '{print $1}')
+        [ -z "$ip" ] && ip="SERVER_IP"
+        echo "http://${ip}:${PUSHIT_DL_PORT}/${token}"
+    fi
 }
 
 _apply_apt_mirror() {
@@ -1108,10 +1255,70 @@ download_database() {
     echo -e "${YELLOW}Dumping '${db_name}'... This may take a while for large databases.${NC}"
     if (set -o pipefail; mysqldump --single-transaction --routines --triggers --events --hex-blob "${db_name}" | gzip > "$DUMP_FILE"); then
         chmod 600 "$DUMP_FILE"
-        SERVER_IP=$(hostname -I | awk '{print $1}')
-        echo -e "${GREEN}Backup created: ${DUMP_FILE} ($(du -h "$DUMP_FILE" | cut -f1))${NC}"
-        echo -e "\n${YELLOW}Download it to your local machine with this command:${NC}"
-        echo "scp root@${SERVER_IP}:${DUMP_FILE} ./"
+        local fsize
+        fsize=$(du -h "$DUMP_FILE" 2>/dev/null | cut -f1)
+        echo -e "${GREEN}Backup created: ${DUMP_FILE} (${fsize})${NC}"
+        # --- One-time 30-min download link ---
+        if ! command -v python3 >/dev/null 2>&1; then
+            echo -e "${YELLOW}python3 not found — installing for one-time link server...${NC}"
+            apt-get update -qq 2>/dev/null && apt-get install -y -qq python3 2>/dev/null || true
+        fi
+        local token dl_file dl_meta expires expires_human dl_url
+        if command -v openssl >/dev/null 2>&1; then
+            token=$(openssl rand -hex 16 2>/dev/null)
+        fi
+        if [ -z "$token" ] || [ ${#token} -lt 16 ]; then
+            token=$(head -c 24 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 32)
+        fi
+        if [ -z "$token" ] || [ ${#token} -lt 16 ]; then
+            token=$(date +%s%N 2>/dev/null | sha256sum 2>/dev/null | head -c 32)
+        fi
+        token=$(echo "$token" | tr -dc 'a-zA-Z0-9' | head -c 32)
+        [ -z "$token" ] && token="$(date +%s)_$$"
+        mkdir -p "$PUSHIT_DL_DIR" 2>/dev/null || true
+        chmod 700 "$PUSHIT_DL_DIR" 2>/dev/null || true
+        dl_file="${PUSHIT_DL_DIR}/${token}"
+        dl_meta="${dl_file}.meta"
+        # Move dump into DL dir (keep original too for scp fallback? move to save space)
+        if cp -a "$DUMP_FILE" "$dl_file" 2>/dev/null || cp "$DUMP_FILE" "$dl_file" 2>/dev/null; then
+            chmod 600 "$dl_file" 2>/dev/null || true
+        else
+            echo -e "${RED}Failed to prepare one-time link file.${NC}"
+            dl_file="$DUMP_FILE"
+        fi
+        expires=$(( $(date +%s) + 1800 ))
+        expires_human=$(date -d "@${expires}" "+%Y-%m-%d %H:%M:%S %Z" 2>/dev/null || date -r "$expires" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "in 30 minutes")
+        {
+            echo "filename=$(basename "$DUMP_FILE")"
+            echo "expires=${expires}"
+            echo "db=${db_name}"
+            echo "size=${fsize:-unknown}"
+            echo "created=$(date +%s)"
+        } > "$dl_meta" 2>/dev/null || true
+        chmod 600 "$dl_meta" 2>/dev/null || true
+        # Schedule local deletion after 30 min (fallback even if server not hit)
+        ( sleep 1800; rm -f "$dl_file" "$dl_meta" "$DUMP_FILE" 2>/dev/null ) >/dev/null 2>&1 &
+        disown 2>/dev/null || true
+        if command -v at >/dev/null 2>&1; then
+            echo "rm -f '$dl_file' '$dl_meta' '$DUMP_FILE' 2>/dev/null" | at now + 30 minutes 2>/dev/null || true
+        fi
+        # Ensure download server is running
+        pushit_dl_ensure_server 2>/dev/null || pushit_dl_init_python_server 2>/dev/null || true
+        dl_url=$(pushit_dl_build_url "$token" 2>/dev/null)
+        echo ""
+        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN} One-time download link (valid 30 min, single use):${NC}"
+        echo -e "  ${YELLOW}${dl_url}${NC}"
+        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  ${YELLOW}curl -O \"${dl_url}\"${NC}"
+        echo -e "  ${YELLOW}wget \"${dl_url}\"${NC}"
+        echo -e "  Expires: ${expires_human}  |  Size: ${fsize}  |  File: $(basename "$DUMP_FILE")"
+        echo -e "  ${RED}After first download OR after 30 min the file is deleted.${NC}"
+        echo ""
+        SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+        echo -e "${YELLOW}Fallback (scp) — file also at:${NC} ${DUMP_FILE}"
+        echo -e "  scp root@${SERVER_IP}:${DUMP_FILE} ./"
+        echo -e "  ${YELLOW}Note: scp file will also be deleted after 30 min.${NC}"
     else
         rm -f "$DUMP_FILE"
         echo -e "${RED}Dump failed. No backup file was kept.${NC}"
