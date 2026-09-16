@@ -457,20 +457,37 @@ pushit_dl_build_url() {
     fi
 }
 
+PUSHIT_APT_BACKUP_DIR="/var/backups/pushit/apt"
+_apt_clean_stale_bak() {
+    local f
+    for f in /etc/apt/sources.list.d/*.bak.* /etc/apt/sources.list.d/*.bak; do
+        [ -e "$f" ] || continue
+        mkdir -p "$PUSHIT_APT_BACKUP_DIR" 2>/dev/null || true
+        mv -f "$f" "$PUSHIT_APT_BACKUP_DIR/" 2>/dev/null || rm -f "$f" 2>/dev/null || true
+        echo -e "${YELLOW}Moved stale apt backup $(basename "$f") -> $PUSHIT_APT_BACKUP_DIR/${NC}"
+    done 2>/dev/null || true
+}
 _apply_apt_mirror() {
     local MIRROR_URL="$1"
     local CODENAME
     CODENAME=$(lsb_release -cs 2>/dev/null || echo "jammy")
     # Normalize: ensure trailing slash
     [[ "$MIRROR_URL" != */ ]] && MIRROR_URL="${MIRROR_URL}/"
-    # Backup existing files
+    # Known broken mirrors — warn upfront (manageitcloud currently returns 403 on pool/)
+    if [[ "$MIRROR_URL" == *"manageitcloud.com"* ]]; then
+        echo -e "${YELLOW}Warning: mirror.manageitcloud.com is currently returning 403 on some packages.${NC}"
+        echo -e "${YELLOW}If apt fails, the script will auto-rollback. Recommended: Abrha or Official.${NC}"
+    fi
+    # Backup existing files (store OUTSIDE sources.list.d to avoid apt warning N: Ignoring file ...)
     local TS
     TS=$(date +%Y%m%d%H%M%S)
+    mkdir -p "$PUSHIT_APT_BACKUP_DIR" 2>/dev/null || true
+    _apt_clean_stale_bak
     if [ -f /etc/apt/sources.list ]; then
-        cp /etc/apt/sources.list "/etc/apt/sources.list.bak.${TS}" 2>/dev/null || true
+        cp /etc/apt/sources.list "${PUSHIT_APT_BACKUP_DIR}/sources.list.bak.${TS}" 2>/dev/null || true
     fi
     if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
-        cp /etc/apt/sources.list.d/ubuntu.sources "/etc/apt/sources.list.d/ubuntu.sources.bak.${TS}" 2>/dev/null || true
+        cp /etc/apt/sources.list.d/ubuntu.sources "${PUSHIT_APT_BACKUP_DIR}/ubuntu.sources.bak.${TS}" 2>/dev/null || true
     fi
 
     if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
@@ -482,7 +499,8 @@ Components: main restricted universe multiverse
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 EOF
         if [ -f /etc/apt/sources.list ]; then
-            sed -i 's|^\(deb\)|# \1|' /etc/apt/sources.list
+            # Comment out classic lines so only ubuntu.sources is active (avoid duplicate)
+            sed -i 's|^\(deb\)|# \1|' /etc/apt/sources.list 2>/dev/null || true
         fi
     else
         cat <<EOF > /etc/apt/sources.list
@@ -493,20 +511,62 @@ EOF
     fi
 
     echo -e "${YELLOW}Updating package lists from ${MIRROR_URL} ...${NC}"
-    if apt-get update; then
-        echo -e "${GREEN}Mirror updated to ${MIRROR_URL}${NC}"
-        return 0
-    else
-        echo -e "${RED}apt-get update failed for ${MIRROR_URL}. Restoring backup...${NC}"
+    local _apt_out
+    _apt_out=$(mktemp /tmp/pushit_apt.XXXXXX 2>/dev/null || echo "/tmp/pushit_apt.$$")
+    local _apt_rc=0
+    if ! apt-get update 2>&1 | tee "$_apt_out"; then _apt_rc=$?; fi
+    # apt-get update can return 0 even with Err:403 — detect it via output
+    if [ "$_apt_rc" -ne 0 ] || grep -qE "403.*Forbidden|Failed to fetch" "$_apt_out" 2>/dev/null; then
+        echo -e "${RED}apt-get update reported errors for ${MIRROR_URL} (403/Failed to fetch). Restoring backup...${NC}"
+        cat "$_apt_out" 2>/dev/null | grep -E "403|Failed to fetch" | head -n 5
         # Restore backup if available
-        if [ -f "/etc/apt/sources.list.bak.${TS}" ]; then
-            cp "/etc/apt/sources.list.bak.${TS}" /etc/apt/sources.list 2>/dev/null || true
+        if [ -f "${PUSHIT_APT_BACKUP_DIR}/sources.list.bak.${TS}" ]; then
+            cp "${PUSHIT_APT_BACKUP_DIR}/sources.list.bak.${TS}" /etc/apt/sources.list 2>/dev/null || true
         fi
-        if [ -f "/etc/apt/sources.list.d/ubuntu.sources.bak.${TS}" ]; then
-            cp "/etc/apt/sources.list.d/ubuntu.sources.bak.${TS}" /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+        if [ -f "${PUSHIT_APT_BACKUP_DIR}/ubuntu.sources.bak.${TS}" ]; then
+            cp "${PUSHIT_APT_BACKUP_DIR}/ubuntu.sources.bak.${TS}" /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
         fi
+        rm -f "$_apt_out" 2>/dev/null || true
+        # Clean stale bak that would cause warning on next run
+        _apt_clean_stale_bak
         return 1
     fi
+    rm -f "$_apt_out" 2>/dev/null || true
+    _apt_clean_stale_bak
+    echo -e "${GREEN}Mirror updated to ${MIRROR_URL}${NC}"
+    return 0
+}
+pushit_fix_broken_mirror() {
+    local cur fallback="http://archive.ubuntu.com/ubuntu/"
+    cur=$(_detect_current_mirror 2>/dev/null || echo "")
+    echo -e "${YELLOW}Current mirror: ${cur}${NC}"
+    # Auto-clean stale bak files first (fixes N: Ignoring file ... warning)
+    _apt_clean_stale_bak
+    if [[ "$cur" == *"manageitcloud.com"* ]]; then
+        echo -e "${YELLOW}Detected broken mirror manageitcloud.com — switching to official...${NC}"
+        if _apply_apt_mirror "$fallback"; then
+            echo -e "${GREEN}Fixed: now using $fallback${NC}"
+            return 0
+        fi
+        echo -e "${YELLOW}Official mirror also failed, trying Abrha...${NC}"
+        _apply_apt_mirror "https://repo.abrha.net/ubuntu/" && return 0
+        _apply_apt_mirror "https://mirror.arvancloud.ir/ubuntu/" && return 0
+        return 1
+    fi
+    # Generic: try apt update and if 403 detected, rollback to official
+    local _tmp
+    _tmp=$(mktemp /tmp/pushit_apt_check.XXXXXX 2>/dev/null || echo "/tmp/pushit_apt_check.$$")
+    apt-get update 2>&1 | tee "$_tmp" >/dev/null 2>&1 || true
+    if grep -qE "403.*Forbidden|Failed to fetch" "$_tmp" 2>/dev/null; then
+        echo -e "${RED}apt is currently failing (403). Switching to official mirror...${NC}"
+        rm -f "$_tmp"
+        _apply_apt_mirror "$fallback" && return 0
+        _apply_apt_mirror "https://repo.abrha.net/ubuntu/" && return 0
+        return 1
+    fi
+    rm -f "$_tmp"
+    echo -e "${GREEN}No 403 detected. Mirror seems OK.${NC}"
+    return 0
 }
 
 _detect_current_mirror() {
@@ -541,16 +601,21 @@ change_mirror() {
         echo -e "Ubuntu version: $(lsb_release -ds 2>/dev/null || echo $CODENAME)"
         echo ""
         echo "1) Abrha            (https://repo.abrha.net/ubuntu/)"
-        echo "2) ManageITCloud    (https://mirror.manageitcloud.com/ubuntu/)"
+        echo -e "2) ManageITCloud    (https://mirror.manageitcloud.com/ubuntu/) ${RED}[BROKEN 403]${NC}"
         echo "3) ArvanCloud       (https://mirror.arvancloud.ir/ubuntu/)"
-        echo "4) Official Ubuntu  (http://archive.ubuntu.com/ubuntu/)"
+        echo "4) Official Ubuntu  (http://archive.ubuntu.com/ubuntu/)  ${GREEN}[recommended if 403]${NC}"
         echo "5) Custom URL"
         echo "6) Show current APT sources"
+        echo "7) Auto-fix broken mirror (detects 403 -> switch to Official)"
         echo "0) Back"
         read -r -p "Choice: " MIRROR_CHOICE
         case "$MIRROR_CHOICE" in
             1) _apply_apt_mirror "https://repo.abrha.net/ubuntu/" ;;
-            2) _apply_apt_mirror "https://mirror.manageitcloud.com/ubuntu/" ;;
+            2)
+                echo -e "${RED}This mirror is currently returning 403 Forbidden on noble-updates/pool.${NC}"
+                read -r -p "Try it anyway? (y/N): " _c; if ! [[ "$_c" =~ ^[yY] ]]; then echo "Skipped."; continue; fi
+                _apply_apt_mirror "https://mirror.manageitcloud.com/ubuntu/"
+                ;;
             3) _apply_apt_mirror "https://mirror.arvancloud.ir/ubuntu/" ;;
             4) _apply_apt_mirror "http://archive.ubuntu.com/ubuntu/" ;;
             5)
@@ -574,6 +639,7 @@ change_mirror() {
                 cat /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || echo "(no ubuntu.sources)"
                 echo ""
                 ;;
+            7) pushit_fix_broken_mirror ;;
             0) break ;;
             *) echo -e "${RED}Invalid choice.${NC}" ;;
         esac
@@ -584,7 +650,35 @@ install_stack() {
     export DEBIAN_FRONTEND=noninteractive
 
     echo -e "${YELLOW}Updating system packages...${NC}"
-    apt-get update
+    _apt_clean_stale_bak 2>/dev/null || true
+    # If current mirror is 403-broken, auto-fix before touching apt
+    local _cur_mir
+    _cur_mir=$(_detect_current_mirror 2>/dev/null || echo "")
+    if [[ "$_cur_mir" == *"manageitcloud.com"* ]]; then
+        echo -e "${YELLOW}Current mirror ${_cur_mir} looks broken (known 403) — auto-fixing...${NC}"
+        pushit_fix_broken_mirror || true
+    fi
+    if ! apt-get update; then
+        echo -e "${RED}apt-get update failed. Checking for 403/mirror issue...${NC}"
+        if ! pushit_fix_broken_mirror; then
+            echo -e "${RED}Mirror auto-fix failed. Fix APT manually (pushit -> 1 -> 4 or 7).${NC}"
+            return 1
+        fi
+        echo -e "${YELLOW}Retrying apt-get update/upgrade...${NC}"
+        apt-get update || { echo -e "${RED}Still failing after mirror fix. Aborting stack install.${NC}"; return 1; }
+    fi
+    # Detect stale 403 even when exit code is 0 (apt can return 0 with Err:403 lines)
+    local _chk
+    _chk=$(mktemp /tmp/pushit_apt_install_chk.XXXXXX 2>/dev/null || echo "/tmp/pushit_apt_install_chk.$$")
+    apt-get update 2>&1 | tee "$_chk" >/dev/null 2>&1 || true
+    if grep -qE "403.*Forbidden|Failed to fetch" "$_chk" 2>/dev/null; then
+        echo -e "${RED}apt update still reports 403 after mirror check. Auto-fixing...${NC}"
+        rm -f "$_chk"
+        pushit_fix_broken_mirror || true
+        apt-get update || { echo -e "${RED}Still failing. Aborting.${NC}"; return 1; }
+    else
+        rm -f "$_chk"
+    fi
     apt-get upgrade -y
 
     echo -e "${YELLOW}Installing base packages...${NC}"
