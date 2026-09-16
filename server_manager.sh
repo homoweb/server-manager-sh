@@ -20,7 +20,7 @@ NODE_VERSION="22"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.3"
+PUSHIT_VERSION="0.1.4"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -338,36 +338,44 @@ import os, sys, time, http.server, socketserver, urllib.parse
 DL_DIR = "/var/lib/pushit/downloads"
 PORT = 8787
 class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
-        token = parsed.path.lstrip("/")
+    def _serve_token(self, token):
+        # normalize: strip query, fragment already done, handle favicon
+        if token == "favicon.ico":
+            self.send_response(404); self.end_headers(); return
         if not token or "/" in token or ".." in token or not token.replace("_","").replace("-","").isalnum():
             self.send_response(400); self.end_headers(); self.wfile.write(b"Invalid token\n"); return
         fpath = os.path.join(DL_DIR, token)
         mpath = os.path.join(DL_DIR, token + ".meta")
-        if not os.path.isfile(fpath) or not os.path.isfile(mpath):
+        # tolerate missing .meta if file exists (serve anyway)
+        if not os.path.isfile(fpath):
             self.send_response(404); self.end_headers(); self.wfile.write(b"Not found or expired\n"); return
         meta = {}
+        if os.path.isfile(mpath):
+            try:
+                with open(mpath) as mf:
+                    for line in mf:
+                        if "=" in line: k,v=line.strip().split("=",1); meta[k]=v
+            except: pass
+            exp = int(meta.get("expires","0") or 0)
+            if exp and time.time() >= exp:
+                try: os.remove(fpath)
+                except: pass
+                try: os.remove(mpath)
+                except: pass
+                self.send_response(410); self.end_headers(); self.wfile.write(b"Link expired (30 min)\n"); return
+        fname = meta.get("filename", token) if meta else token
         try:
-            with open(mpath) as mf:
-                for line in mf:
-                    if "=" in line: k,v=line.strip().split("=",1); meta[k]=v
-        except: pass
-        exp = int(meta.get("expires","0") or 0)
-        if exp and time.time() >= exp:
-            try: os.remove(fpath)
-            except: pass
-            try: os.remove(mpath)
-            except: pass
-            self.send_response(410); self.end_headers(); self.wfile.write(b"Link expired (30 min)\n"); return
-        fname = meta.get("filename", token)
-        fsize = os.path.getsize(fpath)
+            fsize = os.path.getsize(fpath)
+        except:
+            self.send_response(404); self.end_headers(); self.wfile.write(b"Not found or expired\n"); return
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(fsize))
         self.send_header("Content-Disposition", 'attachment; filename="%s"' % fname.replace('"',''))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
+        if self.command == "HEAD":
+            return
         with open(fpath, "rb") as fh:
             while True:
                 chunk = fh.read(1024*1024)
@@ -377,12 +385,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except: pass
         try: os.remove(mpath)
         except: pass
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        token = parsed.path.lstrip("/")
+        # strip query string already via urlparse; also strip trailing ?
+        token = token.split("?")[0].split("#")[0].strip()
+        self._serve_token(token)
+    def do_HEAD(self):
+        parsed = urllib.parse.urlparse(self.path)
+        token = parsed.path.lstrip("/")
+        token = token.split("?")[0].split("#")[0].strip()
+        self._serve_token(token)
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), fmt%args))
 if __name__ == "__main__":
     os.makedirs(DL_DIR, exist_ok=True)
+    # allow immediate reuse after restart
+    socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        httpd.allow_reuse_address = True
         httpd.serve_forever()
 PYEOF
     chmod +x "$PUSHIT_DL_SERVER" 2>/dev/null || true
@@ -397,13 +417,11 @@ pushit_is_installed() {
 
 pushit_dl_ensure_server() {
     pushit_dl_init_python_server
-    if command -v ss >/dev/null 2>&1; then
-        if ss -tlnH 2>/dev/null | grep -q ":${PUSHIT_DL_PORT} "; then return 0; fi
-    elif command -v netstat >/dev/null 2>&1; then
-        if netstat -tln 2>/dev/null | grep -q ":${PUSHIT_DL_PORT} "; then return 0; fi
+    # Always ensure firewall is open
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw allow "${PUSHIT_DL_PORT}/tcp" >/dev/null 2>&1 || true
     fi
-    nohup python3 "$PUSHIT_DL_SERVER" >> "$PUSHIT_DL_LOG" 2>&1 &
-    disown 2>/dev/null || true
+    # Systemd: (re)create units and restart to pick up new python code
     if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
         cat > /etc/systemd/system/pushit-dl.service <<EOF2
 [Unit]
@@ -433,11 +451,30 @@ WantedBy=timers.target
 EOF2
         systemctl daemon-reload 2>/dev/null || true
         systemctl enable --now pushit-dl.service 2>/dev/null || true
+        systemctl restart pushit-dl.service 2>/dev/null || systemctl start pushit-dl.service 2>/dev/null || true
         systemctl enable --now pushit-dl-prune.timer 2>/dev/null || true
+        sleep 1
+        if command -v ss >/dev/null 2>&1; then
+            ss -tlnH 2>/dev/null | grep -q ":${PUSHIT_DL_PORT} " && return 0
+        elif command -v netstat >/dev/null 2>&1; then
+            netstat -tln 2>/dev/null | grep -q ":${PUSHIT_DL_PORT} " && return 0
+        fi
+        # fall through to nohup fallback if systemd failed to listen
     fi
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-        ufw allow "${PUSHIT_DL_PORT}/tcp" >/dev/null 2>&1 || true
+    # Fallback: ensure no stale instance, then start via nohup
+    if command -v ss >/dev/null 2>&1; then
+        if ss -tlnH 2>/dev/null | grep -q ":${PUSHIT_DL_PORT} "; then
+            pkill -f "$PUSHIT_DL_SERVER" 2>/dev/null || true
+            sleep 1
+        fi
+    elif command -v netstat >/dev/null 2>&1; then
+        if netstat -tln 2>/dev/null | grep -q ":${PUSHIT_DL_PORT} "; then
+            pkill -f "$PUSHIT_DL_SERVER" 2>/dev/null || true
+            sleep 1
+        fi
     fi
+    nohup python3 "$PUSHIT_DL_SERVER" >> "$PUSHIT_DL_LOG" 2>&1 &
+    disown 2>/dev/null || true
     sleep 1
 }
 
