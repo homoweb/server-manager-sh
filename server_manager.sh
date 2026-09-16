@@ -20,7 +20,7 @@ NODE_VERSION="22"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.1"
+PUSHIT_VERSION="0.1.2"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -1647,11 +1647,20 @@ manage_database_menu() {
                 elif ! [[ "$db_name" =~ ^[A-Za-z0-9_]+$ && "$db_user" =~ ^[A-Za-z0-9_]+$ ]]; then
                     echo -e "${RED}Database name and user may only contain letters, digits and underscore.${NC}"
                 else
+                    _esc_pass="${db_pass//\'/\'\'}"
                     mysql -e "CREATE DATABASE IF NOT EXISTS \`${db_name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-                    mysql -e "CREATE USER IF NOT EXISTS '${db_user}'@'localhost' IDENTIFIED BY '${db_pass}';"
-                    mysql -e "GRANT ALL PRIVILEGES ON \`${db_name}\`.* TO '${db_user}'@'localhost';"
+                    # Fix: create user for both localhost (socket) and 127.0.0.1 (TCP) so Laravel DB_HOST=127.0.0.1 works
+                    for _h in localhost "127.0.0.1"; do
+                        mysql -e "CREATE USER IF NOT EXISTS '${db_user}'@'$_h' IDENTIFIED WITH mysql_native_password BY '${_esc_pass}';"
+                        mysql -e "ALTER USER '${db_user}'@'$_h' IDENTIFIED WITH mysql_native_password BY '${_esc_pass}';"
+                        mysql -e "GRANT ALL PRIVILEGES ON \`${db_name}\`.* TO '${db_user}'@'$_h';"
+                    done
                     mysql -e "FLUSH PRIVILEGES;"
-                    echo -e "\e[32mSuccess: Database '${db_name}' and user '${db_user}' created.\e[0m"
+                    echo -e "\e[32mSuccess: Database '${db_name}' and user '${db_user}' created (localhost + 127.0.0.1).\e[0m"
+                    if [[ "$db_pass" == *"#"* || "$db_pass" == *"\$"* || "$db_pass" == *" "* ]]; then
+                        echo -e "${YELLOW}Note: your password contains #/\$/space — in Laravel .env wrap it in double quotes:${NC}"
+                        echo -e "${YELLOW}  DB_PASSWORD=\"${db_pass}\"${NC}"
+                    fi
                 fi
                 ;;
             2)
@@ -1689,9 +1698,12 @@ manage_database_menu() {
                         echo -e "${RED}Invalid database user name.${NC}"
                         continue
                     fi
-                    mysql -e "ALTER USER '${edit_user}'@'localhost' IDENTIFIED BY '${new_pass}';"
+                    _esc_new_pass="${new_pass//\'/\'\'}"
+                    for _h in localhost "127.0.0.1"; do
+                        mysql -e "ALTER USER '${edit_user}'@'$_h' IDENTIFIED WITH mysql_native_password BY '${_esc_new_pass}';" 2>/dev/null || mysql -e "CREATE USER IF NOT EXISTS '${edit_user}'@'$_h' IDENTIFIED WITH mysql_native_password BY '${_esc_new_pass}';" 2>/dev/null || true
+                    done
                     mysql -e "FLUSH PRIVILEGES;"
-                    echo -e "\e[32mSuccess: Password updated for user '${edit_user}'.\e[0m"
+                    echo -e "\e[32mSuccess: Password updated for user '${edit_user}' (localhost + 127.0.0.1).\e[0m"
                 else
                     echo -e "\e[31mError: User and password are required.\e[0m"
                 fi
