@@ -1,6 +1,4 @@
 # pushit .gitignore
-# server_manager.sh is GENERATED — edit lib/*.sh and run ./build.sh
-# We still commit it (curl|bash distribution), this is for local artifacts only
 /tmp/
 *.bak.*
 /var/

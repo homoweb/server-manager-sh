@@ -3,9 +3,6 @@
 # =========================================================================
 # Ubuntu Server Manager (PHP/Laravel Stack) — pushit
 # =========================================================================
-# SOURCE-OF-TRUTH: lib/*.sh  (edit there, then ./build.sh)
-# GENERATED FILE:  server_manager.sh is built by build.sh — DO NOT EDIT DIRECTLY
-# =========================================================================
 
 # NOTE: 'set -e' is intentionally NOT used. This is an interactive menu tool;
 # a single failing command (e.g. listing an empty crontab) must not kill the
@@ -23,7 +20,7 @@ NODE_VERSION="22"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.0"
+PUSHIT_VERSION="0.1.1"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600

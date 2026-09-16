@@ -139,37 +139,6 @@ scp ./backup.sql.gz root@SERVER_IP:/root/
 - دسترسی root یا sudo
 - اتصال اینترنت
 
-## 🛠️ ساختار پروژه
-
-سورس به ۱۵ ماژول در `lib/` تقسیم شده — `server_manager.sh` فقط **خروجی بیلد شده** است:
-
-```
-lib/*.sh          ← سورس اصلی (اینجا ادیت کن)
-  00-header.sh      هدر و نسخه
-  01-core.sh        نصب pushit
-  04-apt.sh         میرورها
-  05-stack.sh       نصب استک
-  10-database.sh    دیتابیس
-  14-menu.sh        منوی اصلی
-  ... (۱۵ فایل)
-
-build.sh          ← همه را به هم می‌چسباند (cat lib/*.sh → server_manager.sh)
-server_manager.sh ← فایل توزیعی تک‌فایلی (GENERATED — دستی ادیت نکن)
-```
-
-**چرا `server_manager.sh` هنوز همه کد را دارد؟** چون سرور فقط یک فایل را با `curl` می‌گیرد:
-`bash <(curl -s .../server_manager.sh)` — گیت‌هاب نمی‌تواند ۱۵ فایل جدا بدهد. این فایل مثل `dist/bundle.js` است.
-
-**روش کار:**
-
-```bash
-# 1. فقط lib/*.sh را ویرایش کن
-# 2. بیلد بگیر
-./build.sh
-# 3. کامیت کن (هر دو)
-git add lib/*.sh server_manager.sh && git commit -m "..."
-```
-
 ---
 
 <div align="center">
