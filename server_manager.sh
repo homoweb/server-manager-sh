@@ -22,7 +22,7 @@ NPM_VERSION="12.0.2"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.11"
+PUSHIT_VERSION="0.1.12"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -92,6 +92,13 @@ pushit_ssh_port() {
     fi
     if ! [[ "$_port" =~ ^[0-9]+$ ]]; then _port="22"; fi
     echo "$_port"
+}
+pushit_is_laravel() {
+    local _dir="$1"
+    [ -f "${_dir}/artisan" ] && return 0
+    [ -f "${_dir}/bootstrap/app.php" ] && return 0
+    if [ -f "${_dir}/composer.json" ] && grep -q '"laravel/framework"' "${_dir}/composer.json" 2>/dev/null; then return 0; fi
+    return 1
 }
 pushit_auto_install() {
     local me=""
@@ -1043,13 +1050,14 @@ EOF
             # removed (Delete Site, manual cleanup, ...), the next run would
             # fail every git call with "Unable to read current working
             # directory". All app commands run via an explicit subshell cd.
-            # Ensure Laravel writable dirs BEFORE composer (post-autoload-dump runs package:discover which needs bootstrap/cache)
-            for _d in "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" "/home/$USERNAME/$DOMAIN/storage/framework/cache" "/home/$USERNAME/$DOMAIN/storage/framework/sessions" "/home/$USERNAME/$DOMAIN/storage/framework/views" "/home/$USERNAME/$DOMAIN/storage/logs"; do
-                mkdir -p "$_d" 2>/dev/null || true
-            done
-            chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
-            [ -d "/home/$USERNAME/$DOMAIN/storage" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/storage" 2>/dev/null || true
-            [ -d "/home/$USERNAME/$DOMAIN/bootstrap/cache" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
+            if pushit_is_laravel "/home/$USERNAME/$DOMAIN"; then
+                for _d in "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" "/home/$USERNAME/$DOMAIN/storage/framework/cache" "/home/$USERNAME/$DOMAIN/storage/framework/sessions" "/home/$USERNAME/$DOMAIN/storage/framework/views" "/home/$USERNAME/$DOMAIN/storage/logs"; do
+                    mkdir -p "$_d" 2>/dev/null || true
+                done
+                chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
+                [ -d "/home/$USERNAME/$DOMAIN/storage" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/storage" 2>/dev/null || true
+                [ -d "/home/$USERNAME/$DOMAIN/bootstrap/cache" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
+            fi
             if [ -f "/home/$USERNAME/$DOMAIN/composer.json" ]; then
                 sudo -u "$USERNAME" bash -c "cd '/home/$USERNAME/$DOMAIN' && composer install --no-dev --optimize-autoloader"
             fi
@@ -1080,13 +1088,15 @@ EOF
                     fi
                 fi
             fi
-            if [ -f "/home/$USERNAME/$DOMAIN/artisan" ]; then
-                # Ensure writable dirs exist before artisan (fixes PackageManifest bootstrap/cache error)
+            if pushit_is_laravel "/home/$USERNAME/$DOMAIN" && [ -f "/home/$USERNAME/$DOMAIN/artisan" ]; then
                 mkdir -p "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
                 mkdir -p "/home/$USERNAME/$DOMAIN/storage/framework/cache" "/home/$USERNAME/$DOMAIN/storage/framework/sessions" "/home/$USERNAME/$DOMAIN/storage/framework/views" "/home/$USERNAME/$DOMAIN/storage/logs" 2>/dev/null || true
                 chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
                 chmod -R 775 "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
-                sudo -u "$USERNAME" bash -c "cd '/home/$USERNAME/$DOMAIN' && cp .env.example .env && php artisan key:generate"
+                if [ -f "/home/$USERNAME/$DOMAIN/.env.example" ] && [ ! -f "/home/$USERNAME/$DOMAIN/.env" ]; then
+                    sudo -u "$USERNAME" bash -c "cd '/home/$USERNAME/$DOMAIN' && cp .env.example .env"
+                fi
+                sudo -u "$USERNAME" bash -c "cd '/home/$USERNAME/$DOMAIN' && php artisan key:generate --force 2>/dev/null || php artisan key:generate"
             fi
             ;;
         2)
@@ -1136,13 +1146,15 @@ EOF
             chmod 600 "/home/$USERNAME/$DOMAIN/.env"
         fi
 
-        # Laravel writable dirs — always ensure they exist and are 775 (fixes bootstrap/cache error)
-        for _d in "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" "/home/$USERNAME/$DOMAIN/storage/framework/cache" "/home/$USERNAME/$DOMAIN/storage/framework/sessions" "/home/$USERNAME/$DOMAIN/storage/framework/views" "/home/$USERNAME/$DOMAIN/storage/logs"; do
-            mkdir -p "$_d" 2>/dev/null || true
-        done
-        chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
-        [ -d "/home/$USERNAME/$DOMAIN/storage" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/storage" 2>/dev/null || true
-        [ -d "/home/$USERNAME/$DOMAIN/bootstrap/cache" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
+        # Laravel writable dirs — only for Laravel projects (fixes bootstrap/cache error)
+        if pushit_is_laravel "/home/$USERNAME/$DOMAIN"; then
+            for _d in "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" "/home/$USERNAME/$DOMAIN/storage/framework/cache" "/home/$USERNAME/$DOMAIN/storage/framework/sessions" "/home/$USERNAME/$DOMAIN/storage/framework/views" "/home/$USERNAME/$DOMAIN/storage/logs"; do
+                mkdir -p "$_d" 2>/dev/null || true
+            done
+            chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
+            [ -d "/home/$USERNAME/$DOMAIN/storage" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/storage" 2>/dev/null || true
+            [ -d "/home/$USERNAME/$DOMAIN/bootstrap/cache" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
+        fi
     fi
     
     # PHP-FPM Pool
