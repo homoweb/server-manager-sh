@@ -1888,20 +1888,51 @@ manage_cron() {
         case $CRON_CHOICE in
             1)
                 read -r -p "Enter username (e.g., root, or isolated user): " C_USER
-                crontab -u "$C_USER" -l || echo "No crontab for $C_USER"
+                if [ -z "$C_USER" ]; then
+                    echo -e "${RED}Username cannot be empty.${NC}"
+                    continue
+                fi
+                if ! id "$C_USER" >/dev/null 2>&1; then
+                    echo -e "${RED}User '$C_USER' does not exist.${NC}"
+                    continue
+                fi
+                crontab -u "$C_USER" -l 2>/dev/null || echo "No crontab for $C_USER"
                 ;;
             2)
                 read -r -p "Enter username to run cron as: " C_USER
+                if [ -z "$C_USER" ]; then
+                    echo -e "${RED}Username cannot be empty.${NC}"; continue
+                fi
+                if ! id "$C_USER" >/dev/null 2>&1; then
+                    echo -e "${RED}User '$C_USER' does not exist.${NC}"
+                    continue
+                fi
                 echo -e "\e[33mExample Schedule:\e[0m * * * * * (Every minute)"
                 read -r -p "Enter schedule expression: " C_SCHED
                 echo -e "\e[33mExample Command:\e[0m cd /home/user && php artisan schedule:run >> /dev/null 2>&1"
                 read -r -p "Enter command: " C_CMD
-                
-                (crontab -u "$C_USER" -l 2>/dev/null; echo "$C_SCHED $C_CMD") | crontab -u "$C_USER" -
-                echo -e "\e[32mJob added successfully.\e[0m"
+
+                # Use temp file instead of pipe — more reliable when no crontab exists
+                _cron_tmp=$(mktemp)
+                crontab -u "$C_USER" -l > "$_cron_tmp" 2>/dev/null || true
+                printf '%s\n' "$C_SCHED $C_CMD" >> "$_cron_tmp"
+                if crontab -u "$C_USER" "$_cron_tmp"; then
+                    echo -e "\e[32mJob added successfully.${NC}"
+                else
+                    echo -e "\e[31mFailed to add cron job.${NC}"
+                fi
+                rm -f "$_cron_tmp"
                 ;;
             3)
                 read -r -p "Enter username to manage: " C_USER
+                if [ -z "$C_USER" ]; then
+                    echo -e "${RED}Username cannot be empty.${NC}"
+                    continue
+                fi
+                if ! id "$C_USER" >/dev/null 2>&1; then
+                    echo -e "${RED}User '$C_USER' does not exist.${NC}"
+                    continue
+                fi
                 crontab -u "$C_USER" -l > /tmp/cron.tmp 2>/dev/null
                 if [ ! -s /tmp/cron.tmp ]; then 
                     echo -e "\e[31mNo jobs found for $C_USER.\e[0m"
