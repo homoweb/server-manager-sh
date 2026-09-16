@@ -703,8 +703,27 @@ install_stack() {
             ;;
     esac
     
-    # Nginx & MySQL
-    apt-get install -y nginx mysql-server
+    # Nginx & MySQL (verify — previous 403 mirror left MySQL uninstalled)
+    apt-get install -y nginx mysql-server mysql-client || apt-get install -y nginx mysql-server || true
+    if ! command -v mysql >/dev/null 2>&1; then
+        echo -e "${RED}MySQL still not installed after 'apt-get install mysql-server'. Trying fallback...${NC}"
+        apt-get update -qq 2>/dev/null || true
+        apt-get install -y mysql-server mysql-client 2>&1 | tail -n 30 || true
+    fi
+    # Ensure MySQL daemon is enabled & running (otherwise Laravel gets Connection refused)
+    if command -v mysql >/dev/null 2>&1; then
+        systemctl enable --now mysql 2>/dev/null || systemctl enable --now mysqld 2>/dev/null || systemctl start mysql 2>/dev/null || service mysql start 2>/dev/null || true
+        sleep 2
+        if ! mysql -e "SELECT 1" >/dev/null 2>&1; then
+            echo -e "${YELLOW}Warning: MySQL installed but 'mysql -e SELECT 1' failed.${NC}"
+            echo -e "${YELLOW}Check: systemctl status mysql --no-pager | head -n 30 ; journalctl -u mysql -n 30 --no-pager${NC}"
+        else
+            echo -e "${GREEN}MySQL is up: $(mysql --version 2>/dev/null)${NC}"
+        fi
+    else
+        echo -e "${RED}MySQL client still missing — DB features will not work until installed.${NC}"
+        echo -e "${YELLOW}Manual: sudo apt-get update && sudo apt-get install -y mysql-server mysql-client && sudo systemctl enable --now mysql${NC}"
+    fi
     
     # Node.js (re-running this option also upgrades an existing Node 20 to the version above)
     curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash -
@@ -1425,7 +1444,36 @@ harden_server() {
     echo -e "${YELLOW}IMPORTANT: Keep this session open and test a new SSH login before closing it!${NC}"
 }
 
+# pushit DB helper — validate mysql client + daemon before any DB action
+pushit_db_require() {
+    if ! command -v mysql >/dev/null 2>&1; then
+        echo -e "${RED}MySQL client 'mysql' not found.${NC}"
+        echo -e "${YELLOW}MySQL is not installed on this server.${NC}"
+        echo -e "${YELLOW}Fix: sudo pushit -> 2) Install Full Stack${NC}"
+        echo -e "${YELLOW}Quick: sudo apt-get update && sudo apt-get install -y mysql-server mysql-client && sudo systemctl enable --now mysql${NC}"
+        return 1
+    fi
+    if ! systemctl is-active --quiet mysql 2>/dev/null && ! systemctl is-active --quiet mysqld 2>/dev/null && ! pgrep -x mysqld >/dev/null 2>&1; then
+        echo -e "${YELLOW}MySQL service is not running - trying to start...${NC}"
+        systemctl enable --now mysql 2>/dev/null || systemctl enable --now mysqld 2>/dev/null || systemctl start mysql 2>/dev/null || systemctl start mysqld 2>/dev/null || service mysql start 2>/dev/null || true
+        sleep 2
+    fi
+    if ! systemctl is-active --quiet mysql 2>/dev/null && ! systemctl is-active --quiet mysqld 2>/dev/null && ! pgrep -x mysqld >/dev/null 2>&1; then
+        echo -e "${RED}MySQL is installed but not running.${NC}"
+        echo -e "${YELLOW}Check: systemctl status mysql --no-pager | head -n 40${NC}"
+        echo -e "${YELLOW}      journalctl -u mysql -n 50 --no-pager${NC}"
+        return 1
+    fi
+    if ! mysql -e "SELECT 1" >/dev/null 2>&1; then
+        echo -e "${RED}Cannot connect to MySQL (socket/auth). Is mysqld up?${NC}"
+        echo -e "${YELLOW}Try: sudo mysql -e \"SELECT 1\"   (root uses auth_socket)${NC}"
+        return 1
+    fi
+    return 0
+}
+
 download_database() {
+    if ! pushit_db_require; then return 1; fi
     if ! command -v mysqldump > /dev/null 2>&1; then
         echo -e "${RED}'mysqldump' not found. Install it first: apt-get install -y mysql-client${NC}"
         return 1
@@ -1524,6 +1572,7 @@ download_database() {
 }
 
 upload_database() {
+    if ! pushit_db_require; then return 1; fi
     SERVER_IP=$(hostname -I | awk '{print $1}')
     echo -e "${YELLOW}Step 1: Upload your backup file to this server with a command like:${NC}"
     echo "scp ./backup.sql.gz root@${SERVER_IP}:/root/"
@@ -1591,6 +1640,7 @@ manage_database_menu() {
 
         case $db_choice in
             1)
+                if ! pushit_db_require; then continue; fi
                 read -r -p "Enter Database Name: " db_name
                 read -r -p "Enter Database User: " db_user
                 read -r -sp "Enter Database Password: " db_pass
@@ -1608,10 +1658,12 @@ manage_database_menu() {
                 fi
                 ;;
             2)
+                if ! pushit_db_require; then continue; fi
                 echo -e "\n--- Existing Databases ---"
                 mysql -e "SHOW DATABASES;" | grep -Ev "^(Database|information_schema|performance_schema|mysql|sys)$"
                 ;;
             3)
+                if ! pushit_db_require; then continue; fi
                 echo -e "\n--- Existing Databases ---"
                 mysql -e "SHOW DATABASES;" | grep -Ev "^(Database|information_schema|performance_schema|mysql|sys)$"
                 echo ""
@@ -1631,6 +1683,7 @@ manage_database_menu() {
                 fi
                 ;;
             4)
+                if ! pushit_db_require; then continue; fi
                 read -r -p "Enter Database User to edit: " edit_user
                 read -r -sp "Enter New Password: " new_pass
                 echo ""

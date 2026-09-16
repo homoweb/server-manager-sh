@@ -52,8 +52,27 @@ install_stack() {
             ;;
     esac
     
-    # Nginx & MySQL
-    apt-get install -y nginx mysql-server
+    # Nginx & MySQL (verify — previous 403 mirror left MySQL uninstalled)
+    apt-get install -y nginx mysql-server mysql-client || apt-get install -y nginx mysql-server || true
+    if ! command -v mysql >/dev/null 2>&1; then
+        echo -e "${RED}MySQL still not installed after 'apt-get install mysql-server'. Trying fallback...${NC}"
+        apt-get update -qq 2>/dev/null || true
+        apt-get install -y mysql-server mysql-client 2>&1 | tail -n 30 || true
+    fi
+    # Ensure MySQL daemon is enabled & running (otherwise Laravel gets Connection refused)
+    if command -v mysql >/dev/null 2>&1; then
+        systemctl enable --now mysql 2>/dev/null || systemctl enable --now mysqld 2>/dev/null || systemctl start mysql 2>/dev/null || service mysql start 2>/dev/null || true
+        sleep 2
+        if ! mysql -e "SELECT 1" >/dev/null 2>&1; then
+            echo -e "${YELLOW}Warning: MySQL installed but 'mysql -e SELECT 1' failed.${NC}"
+            echo -e "${YELLOW}Check: systemctl status mysql --no-pager | head -n 30 ; journalctl -u mysql -n 30 --no-pager${NC}"
+        else
+            echo -e "${GREEN}MySQL is up: $(mysql --version 2>/dev/null)${NC}"
+        fi
+    else
+        echo -e "${RED}MySQL client still missing — DB features will not work until installed.${NC}"
+        echo -e "${YELLOW}Manual: sudo apt-get update && sudo apt-get install -y mysql-server mysql-client && sudo systemctl enable --now mysql${NC}"
+    fi
     
     # Node.js (re-running this option also upgrades an existing Node 20 to the version above)
     curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash -
