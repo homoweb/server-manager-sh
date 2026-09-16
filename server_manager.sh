@@ -18,6 +18,9 @@ PHP_VERSION="8.4"
 # Single source of truth for the Node.js major version (NodeSource setup script)
 NODE_VERSION="22"
 
+PUSHIT_BIN="/usr/local/bin/pushit"
+PUSHIT_CONFIG="/etc/pushit.conf"
+
 check_root() {
     if [ "$EUID" -ne 0 ]; then
         echo -e "${RED}Execute as root or with sudo.${NC}"
@@ -35,10 +38,108 @@ anchor_cwd() {
 }
 
 install_to_bin() {
-    curl -fsSL https://raw.githubusercontent.com/homoweb/server-manager-sh/main/server_manager.sh -o /usr/local/bin/pushit \
-        && chmod +x /usr/local/bin/pushit \
-        && echo -e "${GREEN}Script installed/updated. Run 'sudo pushit' from anywhere.${NC}" \
-        || echo -e "${RED}Installation failed. Check your internet connection and try again.${NC}"
+    local _src="${1:-https://raw.githubusercontent.com/homoweb/server-manager-sh/main/server_manager.sh}"
+    if [ -f "$_src" ]; then
+        install -m 0755 "$_src" "$PUSHIT_BIN" \
+            && echo -e "${GREEN}Script installed/updated at $PUSHIT_BIN. Run 'sudo pushit' from anywhere.${NC}" \
+            || echo -e "${RED}Installation failed.${NC}"
+    else
+        curl -fsSL "$_src" -o "$PUSHIT_BIN" \
+            && chmod +x "$PUSHIT_BIN" \
+            && echo -e "${GREEN}Script installed/updated at $PUSHIT_BIN. Run 'sudo pushit' from anywhere.${NC}" \
+            || echo -e "${RED}Installation failed. Check your internet connection and try again.${NC}"
+    fi
+}
+pushit_write_config() {
+    local mode="$1" value="$2" ip_detected
+    ip_detected=$(hostname -I 2>/dev/null | awk '{print $1}')
+    [ -z "$ip_detected" ] && ip_detected=$(hostname -i 2>/dev/null | awk '{print $1}')
+    {
+        echo "# Pushit config - $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "PUSHIT_MODE=\"$mode\""
+        if [ "$mode" = "ip" ]; then
+            echo "PUSHIT_PORT=\"$value\""
+            echo "PUSHIT_IP=\"${ip_detected:-}\""
+            echo "PUSHIT_DOMAIN=\"\""
+        else
+            echo "PUSHIT_DOMAIN=\"$value\""
+            echo "PUSHIT_PORT=\"\""
+            echo "PUSHIT_IP=\"${ip_detected:-}\""
+        fi
+    } > "$PUSHIT_CONFIG"
+    chmod 600 "$PUSHIT_CONFIG" 2>/dev/null || true
+}
+pushit_load_config() {
+    [ -f "$PUSHIT_CONFIG" ] && . "$PUSHIT_CONFIG" 2>/dev/null || true
+}
+pushit_auto_install() {
+    local me=""
+    if [ -f "$0" ] && head -n1 "$0" 2>/dev/null | grep -q "Server Manager"; then me="$0"
+    elif [ -n "${BASH_SOURCE[0]}" ] && [ -f "${BASH_SOURCE[0]}" ] && head -n1 "${BASH_SOURCE[0]}" 2>/dev/null | grep -q "Server Manager"; then me="${BASH_SOURCE[0]}"; fi
+    if [ -n "$me" ] && [ -f "$me" ]; then install -m 0755 "$me" "$PUSHIT_BIN" 2>/dev/null && return 0; fi
+    curl -fsSL https://raw.githubusercontent.com/homoweb/server-manager-sh/main/server_manager.sh -o "$PUSHIT_BIN" 2>/dev/null && chmod +x "$PUSHIT_BIN" 2>/dev/null && return 0
+    return 1
+}
+pushit_first_run_wizard() {
+    echo ""; echo -e "${YELLOW}Welcome to Pushit! First-time setup.${NC}"; echo ""
+    echo "How will this server be accessed?"
+    echo "  1) IP with port  (e.g., http://1.2.3.4:8080)"
+    echo "  2) Domain        (e.g., https://example.com)"
+    local choice=""
+    while true; do
+        read -r -p "Choice [1/2]: " choice; choice=$(echo "$choice" | xargs)
+        if [ "$choice" = "1" ] || [ "$choice" = "2" ]; then break; fi
+        echo -e "${RED}Please enter 1 or 2.${NC}"
+    done
+    if [ "$choice" = "1" ]; then
+        local def_port="8080" port=""
+        while true; do
+            read -r -p "Enter port to use [default: $def_port]: " port; port=$(echo "$port" | xargs); [ -z "$port" ] && port="$def_port"
+            if ! [[ "$port" =~ ^[0-9]+$ ]]; then echo -e "${RED}Port must be a number (1-65535).${NC}"; continue; fi
+            if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then echo -e "${RED}Port out of range.${NC}"; continue; fi
+            if command -v ss >/dev/null 2>&1 && ss -tlnH 2>/dev/null | grep -q ":${port} "; then
+                echo -e "${YELLOW}Warning: port $port appears in use.${NC}"; read -r -p "Use it anyway? (y/n): " yn; if ! [[ "$yn" =~ ^[yY] ]]; then continue; fi
+            elif command -v netstat >/dev/null 2>&1 && netstat -tln 2>/dev/null | grep -q ":${port} "; then
+                echo -e "${YELLOW}Warning: port $port appears in use.${NC}"; read -r -p "Use it anyway? (y/n): " yn; if ! [[ "$yn" =~ ^[yY] ]]; then continue; fi
+            fi
+            break
+        done
+        pushit_write_config "ip" "$port"
+        if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow "$port/tcp" >/dev/null 2>&1 || ufw allow "$port" >/dev/null 2>&1 || true; echo -e "${GREEN}UFW: allowed $port/tcp${NC}"; fi
+        echo ""; echo -e "${GREEN}Setup complete: server will run on IP with port $port${NC}"
+    else
+        local domain=""
+        while true; do
+            read -r -p "Enter domain (e.g., example.com) [Enter to skip]: " domain; domain=$(echo "$domain" | tr '[:upper:]' '[:lower:]' | xargs)
+            if [ -z "$domain" ]; then break; fi
+            if ! [[ "$domain" =~ ^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$ ]]; then echo -e "${RED}Invalid domain. Try again or Enter to skip.${NC}"; continue; fi
+            break
+        done
+        pushit_write_config "domain" "$domain"
+        echo ""; if [ -n "$domain" ]; then echo -e "${GREEN}Setup complete: domain mode ($domain)${NC}"; else echo -e "${GREEN}Setup complete: domain mode (no default domain).${NC}"; fi
+    fi
+    echo -e "${GREEN}Config saved to $PUSHIT_CONFIG${NC}"; echo ""
+}
+pushit_show_banner() {
+    pushit_load_config
+    if [ -f "$PUSHIT_CONFIG" ]; then
+        if [ "${PUSHIT_MODE:-}" = "ip" ] && [ -n "${PUSHIT_PORT:-}" ]; then
+            local ip_disp="${PUSHIT_IP:-}"
+            [ -z "$ip_disp" ] && ip_disp=$(hostname -I 2>/dev/null | awk '{print $1}')
+            [ -z "$ip_disp" ] && ip_disp="<server-ip>"
+            echo -e "${GREEN}Mode: IP  |  http://${ip_disp}:${PUSHIT_PORT}  (port ${PUSHIT_PORT})${NC}"
+        elif [ "${PUSHIT_MODE:-}" = "domain" ]; then
+            if [ -n "${PUSHIT_DOMAIN:-}" ]; then echo -e "${GREEN}Mode: Domain  |  https://${PUSHIT_DOMAIN}${NC}"
+            else echo -e "${GREEN}Mode: Domain  (no default domain set)${NC}"; fi
+        fi
+    fi
+}
+
+pushit_is_installed() {
+    # Consider installed if we are already running as pushit, or binary exists
+    if [ -x "$PUSHIT_BIN" ] && [ -f "$PUSHIT_BIN" ]; then return 0; fi
+    if [ "$0" = "$PUSHIT_BIN" ] || [ "${BASH_SOURCE[0]:-}" = "$PUSHIT_BIN" ]; then return 0; fi
+    return 1
 }
 
 _apply_apt_mirror() {
@@ -1381,40 +1482,76 @@ manage_dns() {
         esac
     done
 }
+pushit_ensure_bootstrap() {
+    # Auto-install when running via curl|bash (binary not yet present)
+    if ! pushit_is_installed; then
+        echo -e "${YELLOW}Installing pushit to $PUSHIT_BIN ...${NC}"
+        if pushit_auto_install; then
+            echo -e "${GREEN}Installed to $PUSHIT_BIN${NC}"
+        else
+            echo -e "${RED}Auto-install failed (non-fatal).${NC}"
+        fi
+    else
+        # Update binary if running from a newer script file (e.g., curl re-run)
+        local cur_ver="" bin_ver=""
+        cur_ver=$(grep -m1 "^# Ubuntu Server Manager" "$0" 2>/dev/null || echo "")
+        bin_ver=$(grep -m1 "^# Ubuntu Server Manager" "$PUSHIT_BIN" 2>/dev/null || echo "")
+        # Simple heuristic: if files differ, refresh
+        if [ -f "$0" ] && ! cmp -s "$0" "$PUSHIT_BIN" 2>/dev/null; then
+            install -m 0755 "$0" "$PUSHIT_BIN" 2>/dev/null || true
+        fi
+    fi
+    # First-run wizard if no config yet
+    if [ ! -f "$PUSHIT_CONFIG" ]; then
+        pushit_first_run_wizard
+    fi
+}
+
 show_menu() {
+    pushit_show_banner
     echo -e "\n=== Server Manager (pushit) ==="
+    if [ -f "$PUSHIT_CONFIG" ]; then
+        . "$PUSHIT_CONFIG" 2>/dev/null || true
+        if [ "${PUSHIT_MODE:-}" = "ip" ] && [ -n "${PUSHIT_PORT:-}" ]; then
+            local _ip="${PUSHIT_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
+            echo -e "${YELLOW} [IP mode: ${_ip:-<ip>}:${PUSHIT_PORT}]${NC}"
+        elif [ "${PUSHIT_MODE:-}" = "domain" ] && [ -n "${PUSHIT_DOMAIN:-}" ]; then
+            echo -e "${YELLOW} [Domain mode: ${PUSHIT_DOMAIN}]${NC}"
+        fi
+    fi
     echo "0) Exit"
-    echo "1) Install to /usr/local/bin (pushit)"
-    echo "2) Manage Mirrors (APT)"
-    echo "3) Install Full Stack (Nginx, PHP ${PHP_VERSION}, MySQL, Redis, Node)"
-    echo "4) Manage Sites (Deploy / Delete)"
-    echo "5) Install SSL (Certbot)"
-    echo "6) Manage Firewall (UFW)"
-    echo "7) Harden Server (SSH)"
-    echo "8) Manage DB"
-    echo "9) Manage Cron"
-    echo "10) Manage Supervisor"
-    echo "11) Manage DNS (/etc/resolv.conf)"
+    echo "1) Manage Mirrors (APT)"
+    echo "2) Install Full Stack (Nginx, PHP ${PHP_VERSION}, MySQL, Redis, Node)"
+    echo "3) Manage Sites (Deploy / Delete)"
+    echo "4) Install SSL (Certbot)"
+    echo "5) Manage Firewall (UFW)"
+    echo "6) Harden Server (SSH)"
+    echo "7) Manage DB"
+    echo "8) Manage Cron"
+    echo "9) Manage Supervisor"
+    echo "10) Manage DNS (/etc/resolv.conf)"
+    echo "11) Change Access Mode (IP:port / Domain)"
     read -r -p "Option: " OPT
     case $OPT in
         0) exit 0 ;;
-        1) install_to_bin ;;
-        2) change_mirror ;;
-        3) install_stack ;;
-        4) manage_sites ;;
-        5) install_ssl ;;
-        6) manage_firewall ;;
-        7) harden_server ;;
-        8) manage_database_menu ;;
-        9) manage_cron ;;
-        10) manage_supervisor ;;
-        11) manage_dns ;;
+        1) change_mirror ;;
+        2) install_stack ;;
+        3) manage_sites ;;
+        4) install_ssl ;;
+        5) manage_firewall ;;
+        6) harden_server ;;
+        7) manage_database_menu ;;
+        8) manage_cron ;;
+        9) manage_supervisor ;;
+        10) manage_dns ;;
+        11) pushit_first_run_wizard ;;
         *) echo "Invalid option." ;;
     esac
 }
 
 
 check_root
+pushit_ensure_bootstrap
 while true; do
     show_menu
 done
