@@ -1,7 +1,10 @@
 #!/bin/bash
 
 # =========================================================================
-# Ubuntu Server Manager (PHP/Laravel Stack)
+# Ubuntu Server Manager (PHP/Laravel Stack) — pushit
+# =========================================================================
+# SOURCE-OF-TRUTH: lib/*.sh  (edit there, then ./build.sh)
+# GENERATED FILE:  server_manager.sh is built by build.sh — DO NOT EDIT DIRECTLY
 # =========================================================================
 
 # NOTE: 'set -e' is intentionally NOT used. This is an interactive menu tool;
