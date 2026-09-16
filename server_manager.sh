@@ -135,6 +135,39 @@ pushit_show_banner() {
     fi
 }
 
+pushit_update_script() {
+    local url="https://raw.githubusercontent.com/homoweb/server-manager-sh/main/server_manager.sh"
+    echo -e "${YELLOW}Updating pushit from $url ...${NC}"
+    local tmp
+    tmp=$(mktemp /tmp/pushit.XXXXXX)
+    if ! curl -fsSL "$url" -o "$tmp"; then
+        echo -e "${RED}Download failed. Check internet / URL.${NC}"
+        rm -f "$tmp"
+        return 1
+    fi
+    if ! head -n1 "$tmp" 2>/dev/null | grep -q "Server Manager"; then
+        echo -e "${RED}Downloaded file looks invalid (missing header). Aborted.${NC}"
+        rm -f "$tmp"
+        return 1
+    fi
+    if ! bash -n "$tmp" 2>&1; then
+        echo -e "${RED}Downloaded script has syntax errors. Aborted.${NC}"
+        rm -f "$tmp"
+        return 1
+    fi
+    # Backup current binary
+    if [ -f "$PUSHIT_BIN" ]; then
+        cp -a "$PUSHIT_BIN" "${PUSHIT_BIN}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || cp "$PUSHIT_BIN" "${PUSHIT_BIN}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+    fi
+    install -m 0755 "$tmp" "$PUSHIT_BIN"
+    rm -f "$tmp"
+    echo -e "${GREEN}Updated to $PUSHIT_BIN. Run 'sudo pushit' to use the new version.${NC}"
+    # If current process is not the installed binary, hint to re-exec
+    if [ "$0" != "$PUSHIT_BIN" ] && [ "${BASH_SOURCE[0]:-}" != "$PUSHIT_BIN" ]; then
+        echo -e "${YELLOW}Note: you are running a different copy; restart with 'sudo pushit' for the updated script.${NC}"
+    fi
+}
+
 pushit_is_installed() {
     # Consider installed if we are already running as pushit, or binary exists
     if [ -x "$PUSHIT_BIN" ] && [ -f "$PUSHIT_BIN" ]; then return 0; fi
@@ -1531,6 +1564,7 @@ show_menu() {
     echo "9) Manage Supervisor"
     echo "10) Manage DNS (/etc/resolv.conf)"
     echo "11) Change Access Mode (IP:port / Domain)"
+    echo "12) Update Script (from GitHub)"
     read -r -p "Option: " OPT
     case $OPT in
         0) exit 0 ;;
@@ -1545,6 +1579,7 @@ show_menu() {
         9) manage_supervisor ;;
         10) manage_dns ;;
         11) pushit_first_run_wizard ;;
+        12) pushit_update_script ;;
         *) echo "Invalid option." ;;
     esac
 }
