@@ -22,7 +22,7 @@ NPM_VERSION="12.0.2"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.13"
+PUSHIT_VERSION="0.1.14"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
