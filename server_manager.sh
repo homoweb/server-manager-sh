@@ -20,7 +20,7 @@ NODE_VERSION="22"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.2"
+PUSHIT_VERSION="0.1.3"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -240,8 +240,10 @@ pushit_update_script() {
             return 1
         fi
     fi
-    if ! head -n1 "$tmp" 2>/dev/null | grep -q "Server Manager"; then
+    if ! head -n 20 "$tmp" 2>/dev/null | grep -qE "Server Manager|PUSHIT_VERSION"; then
         echo -e "${RED}Downloaded file looks invalid (missing header). Aborted.${NC}"
+        echo -e "${YELLOW}First 5 lines of download:${NC}"
+        head -n 5 "$tmp" 2>/dev/null | sed 's/^/  /' || true
         rm -f "$tmp"
         return 1
     fi
