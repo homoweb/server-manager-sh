@@ -22,7 +22,7 @@ NPM_VERSION="12.0.2"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.9"
+PUSHIT_VERSION="0.1.10"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -1074,6 +1074,11 @@ EOF
                 fi
             fi
             if [ -f "/home/$USERNAME/$DOMAIN/artisan" ]; then
+                # Ensure writable dirs exist before artisan (fixes PackageManifest bootstrap/cache error)
+                mkdir -p "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
+                mkdir -p "/home/$USERNAME/$DOMAIN/storage/framework/cache" "/home/$USERNAME/$DOMAIN/storage/framework/sessions" "/home/$USERNAME/$DOMAIN/storage/framework/views" "/home/$USERNAME/$DOMAIN/storage/logs" 2>/dev/null || true
+                chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
+                chmod -R 775 "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
                 sudo -u "$USERNAME" bash -c "cd '/home/$USERNAME/$DOMAIN' && cp .env.example .env && php artisan key:generate"
             fi
             ;;
@@ -1124,10 +1129,13 @@ EOF
             chmod 600 "/home/$USERNAME/$DOMAIN/.env"
         fi
 
-        if [ -d "/home/$USERNAME/$DOMAIN/storage" ]; then
-            chmod -R 775 "/home/$USERNAME/$DOMAIN/storage"
-            chmod -R 775 "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
-        fi
+        # Laravel writable dirs — always ensure they exist and are 775 (fixes bootstrap/cache error)
+        for _d in "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" "/home/$USERNAME/$DOMAIN/storage/framework/cache" "/home/$USERNAME/$DOMAIN/storage/framework/sessions" "/home/$USERNAME/$DOMAIN/storage/framework/views" "/home/$USERNAME/$DOMAIN/storage/logs"; do
+            mkdir -p "$_d" 2>/dev/null || true
+        done
+        chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
+        [ -d "/home/$USERNAME/$DOMAIN/storage" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/storage" 2>/dev/null || true
+        [ -d "/home/$USERNAME/$DOMAIN/bootstrap/cache" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
     fi
     
     # PHP-FPM Pool
