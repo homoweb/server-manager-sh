@@ -20,7 +20,7 @@ NODE_VERSION="22"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.6"
+PUSHIT_VERSION="0.1.7"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -81,6 +81,15 @@ pushit_write_config() {
 }
 pushit_load_config() {
     [ -f "$PUSHIT_CONFIG" ] && . "$PUSHIT_CONFIG" 2>/dev/null || true
+}
+pushit_ssh_port() {
+    local _port=""
+    _port=$(grep -Eh "^\s*Port\s+" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | grep -v "^#" | awk '{print $2}' | tail -n1 | tr -d '[:space:]')
+    if [ -z "$_port" ]; then
+        _port=$(sshd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | tail -n1 | tr -d '[:space:]')
+    fi
+    if ! [[ "$_port" =~ ^[0-9]+$ ]]; then _port="22"; fi
+    echo "$_port"
 }
 pushit_auto_install() {
     local me=""
@@ -1629,8 +1638,15 @@ download_database() {
         echo -e "  ${RED}Link expires in 10 min — reusable until expiry.${NC}"
         echo ""
         SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-        echo -e "${YELLOW}Fallback (scp) — file also at:${NC} ${DUMP_FILE}"
-        echo -e "  scp root@${SERVER_IP}:${DUMP_FILE} ./"
+        _SSH_PORT=$(pushit_ssh_port)
+        if [ "$_SSH_PORT" != "22" ]; then
+            echo -e "${YELLOW}Fallback (scp) — file also at:${NC} ${DUMP_FILE}"
+            echo -e "  scp -P ${_SSH_PORT} root@${SERVER_IP}:${DUMP_FILE} ./"
+            echo -e "  ${YELLOW}SSH port is ${_SSH_PORT} (from sshd_config) — use -P ${_SSH_PORT} for scp/ssh.${NC}"
+        else
+            echo -e "${YELLOW}Fallback (scp) — file also at:${NC} ${DUMP_FILE}"
+            echo -e "  scp root@${SERVER_IP}:${DUMP_FILE} ./"
+        fi
         echo -e "  ${YELLOW}Note: file will be deleted after 10 min.${NC}"
     else
         rm -f "$DUMP_FILE"
@@ -1642,8 +1658,15 @@ download_database() {
 upload_database() {
     if ! pushit_db_require; then return 1; fi
     SERVER_IP=$(hostname -I | awk '{print $1}')
-    echo -e "${YELLOW}Step 1: Upload your backup file to this server with a command like:${NC}"
-    echo "scp ./backup.sql.gz root@${SERVER_IP}:/root/"
+    _SSH_PORT=$(pushit_ssh_port)
+    if [ "$_SSH_PORT" != "22" ]; then
+        echo -e "${YELLOW}Step 1: Upload your backup file to this server with a command like:${NC}"
+        echo "scp -P ${_SSH_PORT} ./backup.sql.gz root@${SERVER_IP}:/root/"
+        echo -e "${YELLOW}(SSH port is ${_SSH_PORT} — use -P ${_SSH_PORT})${NC}"
+    else
+        echo -e "${YELLOW}Step 1: Upload your backup file to this server with a command like:${NC}"
+        echo "scp ./backup.sql.gz root@${SERVER_IP}:/root/"
+    fi
     echo ""
     read -r -p "Enter path of the SQL file on this server (e.g., /root/backup.sql or /root/backup.sql.gz): " SQL_FILE
     if [ ! -f "$SQL_FILE" ]; then
