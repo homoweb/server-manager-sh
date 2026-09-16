@@ -17,10 +17,12 @@ NC='\033[0m'
 PHP_VERSION="8.4"
 # Single source of truth for the Node.js major version (NodeSource setup script)
 NODE_VERSION="22"
+# Single source of truth for npm version (pinned after Node install)
+NPM_VERSION="12.0.2"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.8"
+PUSHIT_VERSION="0.1.9"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -805,6 +807,13 @@ install_stack() {
     # Node.js (re-running this option also upgrades an existing Node 20 to the version above)
     curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash -
     apt-get install -y nodejs
+    if command -v npm >/dev/null 2>&1; then
+        echo -e "${YELLOW}Pinning npm to v${NPM_VERSION}...${NC}"
+        npm install -g "npm@${NPM_VERSION}" 2>&1 | tail -n 20 || npm install -g "npm@${NPM_VERSION}" --force 2>&1 | tail -n 20 || true
+        echo -e "${GREEN}npm version: $(npm --version 2>/dev/null || echo unknown)${NC}"
+    else
+        echo -e "${YELLOW}npm not found after Node install — skipping pin to ${NPM_VERSION}.${NC}"
+    fi
     
     # Composer (requires PHP CLI)
     if command -v php > /dev/null 2>&1; then
