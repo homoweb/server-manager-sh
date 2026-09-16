@@ -41,38 +41,127 @@ install_to_bin() {
         || echo -e "${RED}Installation failed. Check your internet connection and try again.${NC}"
 }
 
+_apply_apt_mirror() {
+    local MIRROR_URL="$1"
+    local CODENAME
+    CODENAME=$(lsb_release -cs 2>/dev/null || echo "jammy")
+    # Normalize: ensure trailing slash
+    [[ "$MIRROR_URL" != */ ]] && MIRROR_URL="${MIRROR_URL}/"
+    # Backup existing files
+    local TS
+    TS=$(date +%Y%m%d%H%M%S)
+    if [ -f /etc/apt/sources.list ]; then
+        cp /etc/apt/sources.list "/etc/apt/sources.list.bak.${TS}" 2>/dev/null || true
+    fi
+    if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+        cp /etc/apt/sources.list.d/ubuntu.sources "/etc/apt/sources.list.d/ubuntu.sources.bak.${TS}" 2>/dev/null || true
+    fi
+
+    if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+        cat <<EOF > /etc/apt/sources.list.d/ubuntu.sources
+Types: deb
+URIs: ${MIRROR_URL}
+Suites: ${CODENAME} ${CODENAME}-updates ${CODENAME}-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+        if [ -f /etc/apt/sources.list ]; then
+            sed -i 's|^\(deb\)|# \1|' /etc/apt/sources.list
+        fi
+    else
+        cat <<EOF > /etc/apt/sources.list
+deb ${MIRROR_URL} $CODENAME main restricted universe multiverse
+deb ${MIRROR_URL} $CODENAME-updates main restricted universe multiverse
+deb ${MIRROR_URL} $CODENAME-security main restricted universe multiverse
+EOF
+    fi
+
+    echo -e "${YELLOW}Updating package lists from ${MIRROR_URL} ...${NC}"
+    if apt-get update; then
+        echo -e "${GREEN}Mirror updated to ${MIRROR_URL}${NC}"
+        return 0
+    else
+        echo -e "${RED}apt-get update failed for ${MIRROR_URL}. Restoring backup...${NC}"
+        # Restore backup if available
+        if [ -f "/etc/apt/sources.list.bak.${TS}" ]; then
+            cp "/etc/apt/sources.list.bak.${TS}" /etc/apt/sources.list 2>/dev/null || true
+        fi
+        if [ -f "/etc/apt/sources.list.d/ubuntu.sources.bak.${TS}" ]; then
+            cp "/etc/apt/sources.list.d/ubuntu.sources.bak.${TS}" /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+        fi
+        return 1
+    fi
+}
+
+_detect_current_mirror() {
+    local cur=""
+    if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+        cur=$(grep -m1 "^URIs:" /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null | awk '{print $2}')
+    fi
+    if [ -z "$cur" ] && [ -f /etc/apt/sources.list ]; then
+        cur=$(grep -m1 "^deb " /etc/apt/sources.list 2>/dev/null | awk '{print $2}')
+        # skip commented
+        if [[ "$cur" == "#"* ]]; then
+            cur=$(grep -m1 "^deb " /etc/apt/sources.list 2>/dev/null | sed 's/^# *//' | awk '{print $2}')
+        fi
+    fi
+    echo "${cur:-unknown}"
+}
+
 change_mirror() {
     if ! command -v lsb_release > /dev/null 2>&1; then
         echo -e "${RED}'lsb_release' not found. Install it first: apt-get install -y lsb-release${NC}"
         return 1
     fi
+    local CODENAME
     CODENAME=$(lsb_release -cs)
-    MIRROR="https://repo.abrha.net/ubuntu/"
+    local CURRENT
+    CURRENT=$(_detect_current_mirror)
 
-    if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
-        # Ubuntu 24.04+ uses the deb822 format in /etc/apt/sources.list.d/ubuntu.sources
-        cat <<EOF > /etc/apt/sources.list.d/ubuntu.sources
-Types: deb
-URIs: ${MIRROR}
-Suites: ${CODENAME} ${CODENAME}-updates ${CODENAME}-security
-Components: main restricted universe multiverse
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-EOF
-        # Comment out legacy entries so they cannot override the new mirror
-        if [ -f /etc/apt/sources.list ]; then
-            sed -i 's|^\(deb\)|# \1|' /etc/apt/sources.list
-        fi
-    else
-        # Ubuntu 20.04 / 22.04 classic format
-        cat <<EOF > /etc/apt/sources.list
-deb ${MIRROR} $CODENAME main restricted universe multiverse
-deb ${MIRROR} $CODENAME-updates main restricted universe multiverse
-deb ${MIRROR} $CODENAME-security main restricted universe multiverse
-EOF
-    fi
-
-    apt-get update
-    echo -e "${GREEN}Mirror updated to repo.abrha.net.${NC}"
+    while true; do
+        CURRENT=$(_detect_current_mirror)
+        echo -e "\n--- Manage Mirrors (APT) ---"
+        echo -e "Current mirror: ${GREEN}${CURRENT}${NC}  (codename: ${CODENAME})"
+        echo -e "Ubuntu version: $(lsb_release -ds 2>/dev/null || echo $CODENAME)"
+        echo ""
+        echo "1) Abrha            (https://repo.abrha.net/ubuntu/)"
+        echo "2) ManageITCloud    (https://mirror.manageitcloud.com/ubuntu/)"
+        echo "3) ArvanCloud       (https://mirror.arvancloud.ir/ubuntu/)"
+        echo "4) Official Ubuntu  (http://archive.ubuntu.com/ubuntu/)"
+        echo "5) Custom URL"
+        echo "6) Show current APT sources"
+        echo "0) Back"
+        read -r -p "Choice: " MIRROR_CHOICE
+        case "$MIRROR_CHOICE" in
+            1) _apply_apt_mirror "https://repo.abrha.net/ubuntu/" ;;
+            2) _apply_apt_mirror "https://mirror.manageitcloud.com/ubuntu/" ;;
+            3) _apply_apt_mirror "https://mirror.arvancloud.ir/ubuntu/" ;;
+            4) _apply_apt_mirror "http://archive.ubuntu.com/ubuntu/" ;;
+            5)
+                read -r -p "Enter custom mirror URL (e.g., https://mirror.example.com/ubuntu/): " CUSTOM_URL
+                CUSTOM_URL=$(echo "$CUSTOM_URL" | xargs)
+                if [ -z "$CUSTOM_URL" ]; then
+                    echo -e "${RED}Empty URL.${NC}"
+                    continue
+                fi
+                # Basic validation: must look like http(s)://...
+                if ! [[ "$CUSTOM_URL" =~ ^https?:// ]]; then
+                    echo -e "${RED}URL must start with http:// or https://${NC}"
+                    continue
+                fi
+                _apply_apt_mirror "$CUSTOM_URL"
+                ;;
+            6)
+                echo -e "\n--- /etc/apt/sources.list ---"
+                cat /etc/apt/sources.list 2>/dev/null || echo "(no sources.list)"
+                echo -e "\n--- /etc/apt/sources.list.d/ubuntu.sources ---"
+                cat /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || echo "(no ubuntu.sources)"
+                echo ""
+                ;;
+            0) break ;;
+            *) echo -e "${RED}Invalid choice.${NC}" ;;
+        esac
+    done
 }
 
 install_stack() {
@@ -484,16 +573,164 @@ EOF
 
 
 
+list_site_domains() {
+    echo -e "\n--- Sites & Domains ---"
+    if [ ! -d /etc/nginx/sites-available ] || [ -z "$(ls -A /etc/nginx/sites-available 2>/dev/null)" ]; then
+        echo "No sites found."
+        return 0
+    fi
+    for f in /etc/nginx/sites-available/*; do
+        [ -f "$f" ] || continue
+        DN=$(basename "$f")
+        SN=$(grep -h "server_name" "$f" | head -n1 | sed 's/^[[:space:]]*server_name//;s/;//;s/^ *//')
+        [ -z "$SN" ] && SN="(no server_name)"
+        ROOT=$(grep -m1 "^[[:space:]]*root" "$f" | awk '{print $2}' | tr -d ';')
+        USER_FROM_ROOT=$(echo "$ROOT" | cut -d'/' -f3)
+        echo -e "\e[32m- $DN\e[0m"
+        echo "    Server Names : $SN"
+        echo "    Root         : $ROOT"
+        [ -n "$USER_FROM_ROOT" ] && echo "    User         : $USER_FROM_ROOT"
+        if [ -L "/etc/nginx/sites-enabled/$DN" ]; then echo "    Enabled : yes"; else echo "    Enabled : no"; fi
+        ALL_COUNT=$(grep -c "server_name" "$f" 2>/dev/null || echo 0)
+        if [ "$ALL_COUNT" -gt 1 ]; then
+            echo "    All blocks   :"
+            grep "server_name" "$f" | sed 's/^[[:space:]]*//' | sed 's/^/      /'
+        fi
+        echo ""
+    done
+}
+add_site_domain() {
+    anchor_cwd
+    echo -e "\n--- Add Domain to Existing Site ---"
+    echo "Existing sites:"
+    if [ -d /etc/nginx/sites-available ] && ls /etc/nginx/sites-available/* >/dev/null 2>&1; then
+        for f in /etc/nginx/sites-available/*; do
+            [ -f "$f" ] || continue
+            _dn=$(basename "$f")
+            _sn=$(grep -h "server_name" "$f" | head -n1 | sed 's/^[[:space:]]*server_name//;s/;//;s/^ *//')
+            echo "  - $_dn  =>  $_sn"
+        done
+    else
+        echo "  (no sites found)"
+        return 1
+    fi
+    echo ""
+    read -r -p "Enter primary domain of target site (e.g., test.com): " PRIMARY
+    PRIMARY=$(echo "$PRIMARY" | tr '[:upper:]' '[:lower:]' | xargs)
+    if ! [[ "$PRIMARY" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]]; then
+        echo -e "${RED}Invalid domain: '$PRIMARY'${NC}"; return 1
+    fi
+    VHOST_CONF="/etc/nginx/sites-available/$PRIMARY"
+    if [ ! -f "$VHOST_CONF" ]; then
+        echo -e "${RED}No vhost for '$PRIMARY'. Use List (option 5) to see sites.${NC}"; return 1
+    fi
+    CUR_LINE=$(grep "server_name" "$VHOST_CONF" | head -n1 | sed 's/^[[:space:]]*//')
+    CUR_ALL=$(grep -h "server_name" "$VHOST_CONF" | sed 's/.*server_name//;s/;//' | tr ' ' '\n' | grep -v '^$' | sort -u | xargs)
+    echo -e "Current: ${YELLOW}$CUR_LINE${NC}"
+    echo -e "All domains: ${GREEN}$CUR_ALL${NC}"
+    read -r -p "Enter new domain/alias (e.g., pay.test.com or hossein.com): " NEW_DOMAIN
+    NEW_DOMAIN=$(echo "$NEW_DOMAIN" | tr '[:upper:]' '[:lower:]' | xargs)
+    if ! [[ "$NEW_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]]; then
+        echo -e "${RED}Invalid domain: '$NEW_DOMAIN'${NC}"; return 1
+    fi
+    if grep -qw "$NEW_DOMAIN" "$VHOST_CONF"; then
+        echo -e "${YELLOW}Domain '$NEW_DOMAIN' already attached to '$PRIMARY'.${NC}"; return 0
+    fi
+    if [ -f "/etc/nginx/sites-available/$NEW_DOMAIN" ] && [ "/etc/nginx/sites-available/$NEW_DOMAIN" != "$VHOST_CONF" ]; then
+        echo -e "${RED}Another site uses '$NEW_DOMAIN' as primary.${NC}"; return 1
+    fi
+    BACKUP="${VHOST_CONF}.bak.$(date +%Y%m%d%H%M%S)"
+    cp "$VHOST_CONF" "$BACKUP"
+    echo "Backup: $BACKUP"
+    sed -i -E "s/(server_name[^;]*);/\1 $NEW_DOMAIN;/" "$VHOST_CONF"
+    sed -i -E "s/  +/ /g" "$VHOST_CONF"
+    echo "Updated server_name:"
+    grep "server_name" "$VHOST_CONF" | sed 's/^[[:space:]]*/  /'
+    if ! nginx -t 2>&1; then
+        echo -e "${RED}nginx -t failed. Reverting.${NC}"; cp "$BACKUP" "$VHOST_CONF"; return 1
+    fi
+    systemctl reload nginx
+    echo -e "${GREEN}Domain '$NEW_DOMAIN' added to '$PRIMARY'. Both serve same site.${NC}"
+    read -r -p "Issue/expand SSL to include '$NEW_DOMAIN' now? (y/n): " SSL_ANS
+    if [[ "$SSL_ANS" =~ ^[yY] ]]; then
+        DOMAINS=$(grep -h "server_name" "$VHOST_CONF" | sed 's/.*server_name//;s/;//' | tr ' ' '\n' | grep -v '^$' | sort -u | xargs)
+        CERT_ARGS=""; for d in $DOMAINS; do CERT_ARGS="$CERT_ARGS -d $d"; done
+        echo -e "${YELLOW}Running: certbot --nginx $CERT_ARGS --expand${NC}"
+        if certbot certificates 2>/dev/null | grep -q "Certificate Name: $PRIMARY"; then
+            certbot --nginx --expand $CERT_ARGS || echo -e "${RED}Expand failed. Check DNS A for '$NEW_DOMAIN' and port 80.${NC}"
+        else
+            certbot --nginx $CERT_ARGS || echo -e "${RED}Failed. Check DNS/port 80.${NC}"
+        fi
+    else
+        DOMAINS=$(grep -h "server_name" "$VHOST_CONF" | sed 's/.*server_name//;s/;//' | tr ' ' '\n' | grep -v '^$' | sort -u | xargs)
+        CERT_ARGS=""; for d in $DOMAINS; do CERT_ARGS="$CERT_ARGS -d $d"; done
+        echo -e "${YELLOW}To enable HTTPS later: certbot --nginx $CERT_ARGS --expand${NC}"
+    fi
+}
+
+
+
+
+remove_site_domain() {
+    anchor_cwd
+    echo -e "\n--- Remove Domain from Site ---"
+    echo "Existing sites:"
+    if [ -d /etc/nginx/sites-available ] && ls /etc/nginx/sites-available/* >/dev/null 2>&1; then
+        for f in /etc/nginx/sites-available/*; do
+            [ -f "$f" ] || continue
+            _dn=$(basename "$f"); _sn=$(grep -h "server_name" "$f" | head -n1 | sed 's/^[[:space:]]*server_name//;s/;//;s/^ *//')
+            echo "  - $_dn  =>  $_sn"
+        done
+    else echo "  (no sites)"; return 1; fi
+    echo ""
+    read -r -p "Enter primary domain of site (e.g., test.com): " PRIMARY
+    PRIMARY=$(echo "$PRIMARY" | tr '[:upper:]' '[:lower:]' | xargs)
+    VHOST_CONF="/etc/nginx/sites-available/$PRIMARY"
+    if [ ! -f "$VHOST_CONF" ]; then echo -e "${RED}No vhost for '$PRIMARY'.${NC}"; return 1; fi
+    CUR_DOMAINS=$(grep -h "server_name" "$VHOST_CONF" | sed 's/.*server_name//;s/;//' | tr ' ' '\n' | grep -v '^$' | sort -u)
+    echo "Domains on '$PRIMARY':"; echo "$CUR_DOMAINS" | sed 's/^/  - /'; echo ""
+    read -r -p "Enter domain to remove: " RM_DOMAIN
+    RM_DOMAIN=$(echo "$RM_DOMAIN" | tr '[:upper:]' '[:lower:]' | xargs)
+    if ! grep -qw "$RM_DOMAIN" "$VHOST_CONF"; then echo -e "${RED}'$RM_DOMAIN' not attached.${NC}"; return 1; fi
+    CNT=$(echo "$CUR_DOMAINS" | wc -l)
+    if [ "$CNT" -le 1 ]; then echo -e "${RED}Cannot remove last domain. Delete site instead.${NC}"; return 1; fi
+    if [ "$RM_DOMAIN" = "$PRIMARY" ]; then
+        echo -e "${YELLOW}Removing primary itself; file stays named '$PRIMARY' but won't serve it.${NC}"
+        read -r -p "Continue? (y/n): " C; if ! [[ "$C" =~ ^[yY] ]]; then echo "Aborted."; return 1; fi
+    fi
+    BACKUP="${VHOST_CONF}.bak.$(date +%Y%m%d%H%M%S)"
+    cp "$VHOST_CONF" "$BACKUP"; echo "Backup: $BACKUP"
+    ESC=$(echo "$RM_DOMAIN" | sed 's/\./\\./g')
+    sed -i -E "s/([[:space:]])${ESC}([[:space:];])/\1\2/g" "$VHOST_CONF"
+    sed -i -E "s/  +/ /g; s/ ;/;/g" "$VHOST_CONF"
+    if ! grep -q "server_name" "$VHOST_CONF"; then echo -e "${RED}No server_name left. Reverting.${NC}"; cp "$BACKUP" "$VHOST_CONF"; return 1; fi
+    sed -i -E "s/server_name[[:space:]]*;/server_name $PRIMARY;/g" "$VHOST_CONF"
+    echo "Updated:"; grep "server_name" "$VHOST_CONF" | sed 's/^[[:space:]]*/  /'
+    if ! nginx -t 2>&1; then echo -e "${RED}nginx -t failed. Reverting.${NC}"; cp "$BACKUP" "$VHOST_CONF"; return 1; fi
+    systemctl reload nginx
+    echo -e "${GREEN}Removed '$RM_DOMAIN' from '$PRIMARY'.${NC}"
+    REM=$(grep -h "server_name" "$VHOST_CONF" | sed 's/.*server_name//;s/;//' | tr ' ' '\n' | grep -v '^$' | sort -u | xargs)
+    ARGS=""; for d in $REM; do ARGS="$ARGS -d $d"; done
+    echo -e "${YELLOW}SSL still contains old domain. To update: certbot --nginx $ARGS --cert-name $PRIMARY${NC}"
+}
+
+
 manage_sites() {
     while true; do
         echo -e "\n--- Site Management ---"
         echo "1) Create Site (Deploy via Git or ZIP)"
         echo "2) Delete Site"
+        echo "3) Add Domain to Site"
+        echo "4) Remove Domain from Site"
+        echo "5) List Sites & Domains"
         echo "0) Back"
         read -r -p "Choice: " SITE_CHOICE
         case $SITE_CHOICE in
             1) deploy_site ;;
             2) delete_site ;;
+            3) add_site_domain ;;
+            4) remove_site_domain ;;
+            5) list_site_domains ;;
             0) break ;;
             *) echo -e "\e[31mInvalid choice.\e[0m" ;;
         esac
@@ -964,7 +1201,7 @@ show_menu() {
     echo -e "\n=== Server Manager (pushit) ==="
     echo "0) Exit"
     echo "1) Install to /usr/local/bin (pushit)"
-    echo "2) Change Mirror (repo.abrha.net)"
+    echo "2) Manage Mirrors (APT)"
     echo "3) Install Full Stack (Nginx, PHP ${PHP_VERSION}, MySQL, Redis, Node)"
     echo "4) Manage Sites (Deploy / Delete)"
     echo "5) Install SSL (Certbot)"
