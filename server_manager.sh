@@ -20,7 +20,7 @@ NODE_VERSION="22"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.4"
+PUSHIT_VERSION="0.1.5"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -334,19 +334,17 @@ pushit_dl_init_python_server() {
     done 2>/dev/null || true
     cat > "$PUSHIT_DL_SERVER" <<'PYEOF'
 #!/usr/bin/env python3
-import os, sys, time, http.server, socketserver, urllib.parse
+import os, sys, time, threading, http.server, socketserver, urllib.parse
 DL_DIR = "/var/lib/pushit/downloads"
 PORT = 8787
 class Handler(http.server.BaseHTTPRequestHandler):
     def _serve_token(self, token):
-        # normalize: strip query, fragment already done, handle favicon
         if token == "favicon.ico":
             self.send_response(404); self.end_headers(); return
         if not token or "/" in token or ".." in token or not token.replace("_","").replace("-","").isalnum():
             self.send_response(400); self.end_headers(); self.wfile.write(b"Invalid token\n"); return
         fpath = os.path.join(DL_DIR, token)
         mpath = os.path.join(DL_DIR, token + ".meta")
-        # tolerate missing .meta if file exists (serve anyway)
         if not os.path.isfile(fpath):
             self.send_response(404); self.end_headers(); self.wfile.write(b"Not found or expired\n"); return
         meta = {}
@@ -354,9 +352,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 with open(mpath) as mf:
                     for line in mf:
-                        if "=" in line: k,v=line.strip().split("=",1); meta[k]=v
-            except: pass
-            exp = int(meta.get("expires","0") or 0)
+                        if "=" in line:
+                            k, v = line.strip().split("=", 1)
+                            meta[k] = v
+            except:
+                pass
+            exp = int(meta.get("expires", "0") or 0)
             if exp and time.time() >= exp:
                 try: os.remove(fpath)
                 except: pass
@@ -368,41 +369,80 @@ class Handler(http.server.BaseHTTPRequestHandler):
             fsize = os.path.getsize(fpath)
         except:
             self.send_response(404); self.end_headers(); self.wfile.write(b"Not found or expired\n"); return
-        self.send_response(200)
+        range_header = self.headers.get("Range")
+        start, end = 0, fsize - 1
+        is_range = False
+        if range_header and range_header.startswith("bytes="):
+            try:
+                spec = range_header[6:].strip().split(",")[0]
+                if "-" in spec:
+                    s, e = spec.split("-", 1)
+                    if s == "":
+                        suffix = int(e)
+                        start = max(0, fsize - suffix)
+                    elif e == "":
+                        start = int(s)
+                    else:
+                        start, end = int(s), int(e)
+                    start = max(0, min(start, fsize - 1))
+                    end = max(start, min(end, fsize - 1))
+                    is_range = True
+            except:
+                is_range = False
+                start, end = 0, fsize - 1
+        length = end - start + 1
+        if is_range:
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{fsize}")
+        else:
+            self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(fsize))
-        self.send_header("Content-Disposition", 'attachment; filename="%s"' % fname.replace('"',''))
+        self.send_header("Content-Length", str(length))
+        self.send_header("Content-Disposition", 'attachment; filename="%s"' % fname.replace('"', ''))
+        self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "no-store")
+        if not is_range:
+            self.send_header("Content-Transfer-Encoding", "binary")
         self.end_headers()
         if self.command == "HEAD":
             return
-        with open(fpath, "rb") as fh:
-            while True:
-                chunk = fh.read(1024*1024)
-                if not chunk: break
-                self.wfile.write(chunk)
-        try: os.remove(fpath)
-        except: pass
-        try: os.remove(mpath)
-        except: pass
+        try:
+            with open(fpath, "rb") as fh:
+                fh.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = fh.read(min(1024*1024, remaining))
+                    if not chunk:
+                        break
+                    try:
+                        self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError):
+                        break
+                    remaining -= len(chunk)
+        except:
+            return
+        if not is_range or (is_range and start == 0):
+            def _delayed_rm(fp=fpath, mp=mpath):
+                time.sleep(45)
+                try: os.remove(fp)
+                except: pass
+                try: os.remove(mp)
+                except: pass
+            threading.Thread(target=_delayed_rm, daemon=True).start()
     def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
-        token = parsed.path.lstrip("/")
-        # strip query string already via urlparse; also strip trailing ?
-        token = token.split("?")[0].split("#")[0].strip()
-        self._serve_token(token)
+        p = urllib.parse.urlparse(self.path)
+        self._serve_token(p.path.lstrip("/").split("?")[0].split("#")[0].strip())
     def do_HEAD(self):
-        parsed = urllib.parse.urlparse(self.path)
-        token = parsed.path.lstrip("/")
-        token = token.split("?")[0].split("#")[0].strip()
-        self._serve_token(token)
+        p = urllib.parse.urlparse(self.path)
+        self._serve_token(p.path.lstrip("/").split("?")[0].split("#")[0].strip())
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), fmt%args))
+class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
 if __name__ == "__main__":
     os.makedirs(DL_DIR, exist_ok=True)
-    # allow immediate reuse after restart
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+    with ThreadedTCPServer(("", PORT), Handler) as httpd:
         httpd.serve_forever()
 PYEOF
     chmod +x "$PUSHIT_DL_SERVER" 2>/dev/null || true
