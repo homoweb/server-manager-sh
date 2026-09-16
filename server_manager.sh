@@ -1194,6 +1194,7 @@ EOF
     systemctl restart "php${PHP_VERSION}-fpm"
     
     # Nginx Vhost
+    mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
     VHOST_CONF="/etc/nginx/sites-available/$DOMAIN"
     cat <<EOF > "$VHOST_CONF"
 server {
@@ -1229,7 +1230,7 @@ server {
     }
 }
 EOF
-    ln -sf "$VHOST_CONF" /etc/nginx/sites-enabled/
+    ln -sf "$VHOST_CONF" "/etc/nginx/sites-enabled/$DOMAIN"
     systemctl reload nginx
     
     echo -e "\e[32mSite $DOMAIN deployed. Root: /home/$USERNAME/$DOMAIN\e[0m"
