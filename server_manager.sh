@@ -1054,9 +1054,15 @@ EOF
                 for _d in "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" "/home/$USERNAME/$DOMAIN/storage/framework/cache" "/home/$USERNAME/$DOMAIN/storage/framework/sessions" "/home/$USERNAME/$DOMAIN/storage/framework/views" "/home/$USERNAME/$DOMAIN/storage/logs"; do
                     mkdir -p "$_d" 2>/dev/null || true
                 done
-                chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
-                [ -d "/home/$USERNAME/$DOMAIN/storage" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/storage" 2>/dev/null || true
-                [ -d "/home/$USERNAME/$DOMAIN/bootstrap/cache" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
+                # Fix ownership for ALL Laravel-critical paths including parent 'bootstrap' dir
+                chown -R "$USERNAME:$USERNAME" \
+                    "/home/$USERNAME/$DOMAIN/storage" \
+                    "/home/$USERNAME/$DOMAIN/bootstrap" 2>/dev/null || true
+                # Set directory permissions to 775 and file permissions to 664
+                find "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" \
+                    -type d -exec chmod 775 {} \; 2>/dev/null || true
+                find "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" \
+                    -type f -exec chmod 664 {} \; 2>/dev/null || true
             fi
             if [ -f "/home/$USERNAME/$DOMAIN/composer.json" ]; then
                 sudo -u "$USERNAME" bash -c "cd '/home/$USERNAME/$DOMAIN' && composer install --no-dev --optimize-autoloader"
@@ -1091,8 +1097,15 @@ EOF
             if pushit_is_laravel "/home/$USERNAME/$DOMAIN" && [ -f "/home/$USERNAME/$DOMAIN/artisan" ]; then
                 mkdir -p "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
                 mkdir -p "/home/$USERNAME/$DOMAIN/storage/framework/cache" "/home/$USERNAME/$DOMAIN/storage/framework/sessions" "/home/$USERNAME/$DOMAIN/storage/framework/views" "/home/$USERNAME/$DOMAIN/storage/logs" 2>/dev/null || true
-                chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
-                chmod -R 775 "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
+                # Fix ownership for ALL Laravel-critical paths including parent 'bootstrap' dir
+                chown -R "$USERNAME:$USERNAME" \
+                    "/home/$USERNAME/$DOMAIN/storage" \
+                    "/home/$USERNAME/$DOMAIN/bootstrap" 2>/dev/null || true
+                # Set directory permissions to 775 and file permissions to 664
+                find "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" \
+                    -type d -exec chmod 775 {} \; 2>/dev/null || true
+                find "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" \
+                    -type f -exec chmod 664 {} \; 2>/dev/null || true
                 if [ -f "/home/$USERNAME/$DOMAIN/.env.example" ] && [ ! -f "/home/$USERNAME/$DOMAIN/.env" ]; then
                     sudo -u "$USERNAME" bash -c "cd '/home/$USERNAME/$DOMAIN' && cp .env.example .env"
                 fi
@@ -1151,9 +1164,15 @@ EOF
             for _d in "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" "/home/$USERNAME/$DOMAIN/storage/framework/cache" "/home/$USERNAME/$DOMAIN/storage/framework/sessions" "/home/$USERNAME/$DOMAIN/storage/framework/views" "/home/$USERNAME/$DOMAIN/storage/logs"; do
                 mkdir -p "$_d" 2>/dev/null || true
             done
-            chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
-            [ -d "/home/$USERNAME/$DOMAIN/storage" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/storage" 2>/dev/null || true
-            [ -d "/home/$USERNAME/$DOMAIN/bootstrap/cache" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
+            # Fix ownership for ALL Laravel-critical paths including parent 'bootstrap' dir
+            chown -R "$USERNAME:$USERNAME" \
+                "/home/$USERNAME/$DOMAIN/storage" \
+                "/home/$USERNAME/$DOMAIN/bootstrap" 2>/dev/null || true
+            # Set directory permissions to 775 and file permissions to 664
+            find "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" \
+                -type d -exec chmod 775 {} \; 2>/dev/null || true
+            find "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" \
+                -type f -exec chmod 664 {} \; 2>/dev/null || true
         fi
     fi
     
