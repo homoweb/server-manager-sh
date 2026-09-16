@@ -20,7 +20,7 @@ NODE_VERSION="22"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.7"
+PUSHIT_VERSION="0.1.8"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -1629,9 +1629,10 @@ download_database() {
         dl_url=$(pushit_dl_build_url "$token" 2>/dev/null)
         echo ""
         echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${GREEN} Download link (valid 10 min):${NC}"
+        echo -e "${GREEN} Download link (valid 10 min, reusable):${NC}"
         echo -e "  ${YELLOW}${dl_url}${NC}"
         echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  ${YELLOW}Browser:${NC} open link above"
         echo -e "  ${YELLOW}curl -O \"${dl_url}\"${NC}"
         echo -e "  ${YELLOW}wget \"${dl_url}\"${NC}"
         echo -e "  Expires: ${expires_human}  |  Size: ${fsize}  |  File: $(basename "$DUMP_FILE")"
@@ -1639,15 +1640,19 @@ download_database() {
         echo ""
         SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
         _SSH_PORT=$(pushit_ssh_port)
+        echo -e "${GREEN}━━━━━━━━ Fallback: scp (if link fails) ━━━━━━━━${NC}"
+        echo -e "  ${YELLOW}File on server:${NC} ${DUMP_FILE}"
         if [ "$_SSH_PORT" != "22" ]; then
-            echo -e "${YELLOW}Fallback (scp) — file also at:${NC} ${DUMP_FILE}"
-            echo -e "  scp -P ${_SSH_PORT} root@${SERVER_IP}:${DUMP_FILE} ./"
-            echo -e "  ${YELLOW}SSH port is ${_SSH_PORT} (from sshd_config) — use -P ${_SSH_PORT} for scp/ssh.${NC}"
+            echo -e "  ${YELLOW}From your PC:${NC}"
+            echo -e "    ${GREEN}scp -P ${_SSH_PORT} root@${SERVER_IP}:${DUMP_FILE} ./  ${YELLOW}← correct${NC}"
+            echo -e "  ${RED}Wrong:${NC} scp root@${SERVER_IP}:${_SSH_PORT}/...  ${YELLOW}(port goes with -P, not after :)${NC}"
+            echo -e "  ${YELLOW}SSH port is ${_SSH_PORT} (from sshd_config) — always use -P ${_SSH_PORT} for ssh/scp.${NC}"
+            echo -e "    ssh -p ${_SSH_PORT} root@${SERVER_IP}  ${YELLOW}(test connection)${NC}"
         else
-            echo -e "${YELLOW}Fallback (scp) — file also at:${NC} ${DUMP_FILE}"
-            echo -e "  scp root@${SERVER_IP}:${DUMP_FILE} ./"
+            echo -e "  ${YELLOW}From your PC:${NC} scp root@${SERVER_IP}:${DUMP_FILE} ./"
         fi
         echo -e "  ${YELLOW}Note: file will be deleted after 10 min.${NC}"
+        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     else
         rm -f "$DUMP_FILE"
         echo -e "${RED}Dump failed. No backup file was kept.${NC}"
@@ -1661,8 +1666,9 @@ upload_database() {
     _SSH_PORT=$(pushit_ssh_port)
     if [ "$_SSH_PORT" != "22" ]; then
         echo -e "${YELLOW}Step 1: Upload your backup file to this server with a command like:${NC}"
-        echo "scp -P ${_SSH_PORT} ./backup.sql.gz root@${SERVER_IP}:/root/"
-        echo -e "${YELLOW}(SSH port is ${_SSH_PORT} — use -P ${_SSH_PORT})${NC}"
+        echo -e "  ${GREEN}scp -P ${_SSH_PORT} ./backup.sql.gz root@${SERVER_IP}:/root/  ${YELLOW}← correct${NC}"
+        echo -e "  ${RED}Wrong:${NC} scp ./backup.sql.gz root@${SERVER_IP}:${_SSH_PORT}/...  ${YELLOW}(port goes with -P)${NC}"
+        echo -e "  ${YELLOW}SSH port is ${_SSH_PORT} — always use -P ${_SSH_PORT}${NC}"
     else
         echo -e "${YELLOW}Step 1: Upload your backup file to this server with a command like:${NC}"
         echo "scp ./backup.sql.gz root@${SERVER_IP}:/root/"
