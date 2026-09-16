@@ -22,7 +22,7 @@ NPM_VERSION="12.0.2"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.10"
+PUSHIT_VERSION="0.1.11"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -1043,6 +1043,13 @@ EOF
             # removed (Delete Site, manual cleanup, ...), the next run would
             # fail every git call with "Unable to read current working
             # directory". All app commands run via an explicit subshell cd.
+            # Ensure Laravel writable dirs BEFORE composer (post-autoload-dump runs package:discover which needs bootstrap/cache)
+            for _d in "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" "/home/$USERNAME/$DOMAIN/storage/framework/cache" "/home/$USERNAME/$DOMAIN/storage/framework/sessions" "/home/$USERNAME/$DOMAIN/storage/framework/views" "/home/$USERNAME/$DOMAIN/storage/logs"; do
+                mkdir -p "$_d" 2>/dev/null || true
+            done
+            chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/$DOMAIN/storage" "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
+            [ -d "/home/$USERNAME/$DOMAIN/storage" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/storage" 2>/dev/null || true
+            [ -d "/home/$USERNAME/$DOMAIN/bootstrap/cache" ] && chmod -R 775 "/home/$USERNAME/$DOMAIN/bootstrap/cache" 2>/dev/null || true
             if [ -f "/home/$USERNAME/$DOMAIN/composer.json" ]; then
                 sudo -u "$USERNAME" bash -c "cd '/home/$USERNAME/$DOMAIN' && composer install --no-dev --optimize-autoloader"
             fi
