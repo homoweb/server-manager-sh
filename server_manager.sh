@@ -56,15 +56,15 @@ pushit_write_config() {
     [ -z "$ip_detected" ] && ip_detected=$(hostname -i 2>/dev/null | awk '{print $1}')
     {
         echo "# Pushit config - $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        echo "PUSHIT_MODE=\"$mode\""
+        printf 'PUSHIT_MODE="%s"\n' "$mode"
         if [ "$mode" = "ip" ]; then
-            echo "PUSHIT_PORT=\"$value\""
-            echo "PUSHIT_IP=\"${ip_detected:-}\""
-            echo "PUSHIT_DOMAIN=\"\""
+            printf 'PUSHIT_PORT="%s"\n' "$value"
+            printf 'PUSHIT_IP="%s"\n' "${ip_detected:-}"
+            echo 'PUSHIT_DOMAIN=""'
         else
-            echo "PUSHIT_DOMAIN=\"$value\""
-            echo "PUSHIT_PORT=\"\""
-            echo "PUSHIT_IP=\"${ip_detected:-}\""
+            printf 'PUSHIT_DOMAIN="%s"\n' "$value"
+            echo 'PUSHIT_PORT=""'
+            printf 'PUSHIT_IP="%s"\n' "${ip_detected:-}"
         fi
     } > "$PUSHIT_CONFIG"
     chmod 600 "$PUSHIT_CONFIG" 2>/dev/null || true
@@ -1349,7 +1349,8 @@ _dns_is_valid_ip() {
 }
 _dns_show_resolv() {
     echo -e "\n--- Current DNS Config ---"
-    echo -e "${YELLOW}/etc/resolv.conf -> $(readlink -f /etc/resolv.conf 2>/dev/null || echo \"(not symlink)\")${NC}"
+    local _resolv_target; _resolv_target=$(readlink -f /etc/resolv.conf 2>/dev/null || echo "not symlink")
+    echo -e "${YELLOW}/etc/resolv.conf -> ${_resolv_target}${NC}"
     ls -l /etc/resolv.conf 2>/dev/null || echo "(no /etc/resolv.conf)"
     echo ""; echo "--- /etc/resolv.conf ---"
     cat /etc/resolv.conf 2>/dev/null || echo "(empty / missing)"
