@@ -22,7 +22,7 @@ NPM_VERSION="12.0.2"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.14"
+PUSHIT_VERSION="0.1.16"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -32,6 +32,14 @@ PUSHIT_DL_DIR="/var/lib/pushit/downloads"
 PUSHIT_DL_PORT="8787"
 PUSHIT_DL_SERVER="/usr/local/bin/pushit-dl-server.py"
 PUSHIT_DL_LOG="/var/log/pushit-dl.log"
+
+# --- AI Agent paths ---
+PUSHIT_AI_DIR="/etc/pushit/ai"
+PUSHIT_AI_SERVER_CONF="${PUSHIT_AI_DIR}/server.json"
+PUSHIT_AI_BIN="/usr/local/bin/pushit-ai-agent"
+PUSHIT_AI_LOG_DIR="/var/log/pushit-ai"
+PUSHIT_AI_DEFAULT_PROVIDER="9router"
+PUSHIT_AI_DEFAULT_MODEL="gpt-5-codex"
 
 check_root() {
     if [ "$EUID" -ne 0 ]; then
@@ -851,8 +859,36 @@ install_stack() {
     echo -e "${YELLOW}check DNS (just configured above), UFW rules and any provider-side filtering.${NC}"
 
     unset DEBIAN_FRONTEND
+    copy_ai_source_files
     echo -e "${GREEN}Stack installed successfully.${NC}"
 }
+
+# ── Copy AI Agent source to /etc/pushit/ai/ (bundled) ─────────────────────
+copy_ai_source_files() {
+    mkdir -p "$PUSHIT_AI_DIR/templates" 2>/dev/null || true
+    if [ ! -f "$PUSHIT_AI_DIR/pushit-ai-agent.py" ]; then
+        python3 << 'PYEOF'
+import base64, os
+d = 'IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiJwdXNoaXQtYWktYWdlbnQg4oCUIENMSSAmIEhUVFAgYWdlbnQgZm9yIFB1c2hpdCBBSSAoT3BlbkFJLWNvbXBhdGlibGUgQVBJKSIiIgppbXBvcnQgb3MsIHN5cywganNvbiwgdXJsbGliLnJlcXVlc3QsIHVybGxpYi5lcnJvciwgYXJncGFyc2UsIHRleHR3cmFwCmZyb20gZGF0ZXRpbWUgaW1wb3J0IGRhdGV0aW1lCmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKQUlfRElSICAgICAgPSAiL2V0Yy9wdXNoaXQvYWkiClNFUlZFUl9DT05GID0gZiJ7QUlfRElSfS9zZXJ2ZXIuanNvbiIKCmRlZiBsb2FkX2NvbmYocGF0aCk6CiAgICB0cnk6CiAgICAgICAgd2l0aCBvcGVuKHBhdGgpIGFzIGY6IHJldHVybiBqc29uLmxvYWQoZikKICAgIGV4Y2VwdCBFeGNlcHRpb246IHJldHVybiB7fQoKZGVmIGxvYWRfcHJvamVjdF9jb25mKHByb2plY3RfcGF0aCk6CiAgICBpZiBwcm9qZWN0X3BhdGggYW5kIG9zLnBhdGguaXNmaWxlKGYie3Byb2plY3RfcGF0aH0vLnB1c2hpdC9haS9jb25maWcuanNvbiIpOgogICAgICAgIHJldHVybiBsb2FkX2NvbmYoZiJ7cHJvamVjdF9wYXRofS8ucHVzaGl0L2FpL2NvbmZpZy5qc29uIiksIGYie3Byb2plY3RfcGF0aH0vLnB1c2hpdC9haS9jb25maWcuanNvbiIKICAgIGlmIG9zLnBhdGguaXNmaWxlKFNFUlZFUl9DT05GKTogcmV0dXJuIGxvYWRfY29uZihTRVJWRVJfQ09ORiksIFNFUlZFUl9DT05GCiAgICByZXR1cm4gTm9uZSwgTm9uZQoKZGVmIGdhdGhlcl9jb250ZXh0KHByb2plY3RfcGF0aCwgbWF4X2ZpbGVzPTgpOgogICAgY3R4ID0geyJmaWxlcyI6IFtdLCAic3RydWN0dXJlIjogW119CiAgICByb290ID0gUGF0aChwcm9qZWN0X3BhdGgpCiAgICBpZiBub3Qgcm9vdC5pc19kaXIoKTogcmV0dXJuIGN0eAogICAgZm9yIHAgaW4gc29ydGVkKHJvb3QuaXRlcmRpcigpKToKICAgICAgICBpZiBwLm5hbWUuc3RhcnRzd2l0aCgiLiIpIG9yIHAubmFtZSBpbiAoInZlbmRvciIsICJub2RlX21vZHVsZXMiKTogY29udGludWUKICAgICAgICBjdHhbInN0cnVjdHVyZSJdLmFwcGVuZChzdHIocC5yZWxhdGl2ZV90byhyb290KSkgKyAoIi8iIGlmIHAuaXNfZGlyKCkgZWxzZSAiIikpCiAgICBmb3IgcGF0IGluIFsiUkVBRE1FLm1kIiwicGFja2FnZS5qc29uIiwiY29tcG9zZXIuanNvbiIsIi5lbnYuZXhhbXBsZSIsCiAgICAgICAgICAgICAgICAicm91dGVzL3dlYi5waHAiLCJyb3V0ZXMvYXBpLnBocCIsImJvb3RzdHJhcC9hcHAucGhwIiwKICAgICAgICAgICAgICAgICJ2aXRlLmNvbmZpZy5qcyIsIkRvY2tlcmZpbGUiXToKICAgICAgICBmdWxsID0gcm9vdCAvIHBhdAogICAgICAgIGlmIGZ1bGwuZXhpc3RzKCk6CiAgICAgICAgICAgIHRyeTogY3R4WyJmaWxlcyJdLmFwcGVuZCh7InBhdGgiOiBwYXQsICJjb250ZW50IjogZnVsbC5yZWFkX3RleHQoZXJyb3JzPSJpZ25vcmUiKVs6MjUwMF19KQogICAgICAgICAgICBleGNlcHQgRXhjZXB0aW9uOiBwYXNzCiAgICAgICAgaWYgbGVuKGN0eFsiZmlsZXMiXSkgPj0gbWF4X2ZpbGVzOiBicmVhawogICAgcmV0dXJuIGN0eAoKZGVmIGJ1aWxkX3N5c3RlbV9wcm9tcHQocHJvamVjdF9wYXRoLCB1c2VybmFtZSk6CiAgICBsaW5lcyA9IFsiWW91IGFyZSBhIGhlbHBmdWwgQUkgYXNzaXN0YW50IGludGVncmF0ZWQgaW50byB0aGUgUHVzaGl0IHNlcnZlciBtYW5hZ2VyLiIsCiAgICAgICAgICAgICAiWW91IGhlbHAgZGV2ZWxvcGVycyBidWlsZCwgZGVidWcsIGFuZCBtYWludGFpbiB0aGVpciBwcm9qZWN0cy4iLCAiIl0KICAgIGlmIHByb2plY3RfcGF0aDoKICAgICAgICBjdHggPSBnYXRoZXJfY29udGV4dChwcm9qZWN0X3BhdGgpCiAgICAgICAgaWYgY3R4WyJmaWxlcyJdOgogICAgICAgICAgICBsaW5lcy5hcHBlbmQoIiMjIFByb2plY3QgQ29udGV4dCIpCiAgICAgICAgICAgIGZvciBmIGluIGN0eFsiZmlsZXMiXToKICAgICAgICAgICAgICAgIGxpbmVzLmFwcGVuZChmIlxuIyMjIHtmWydwYXRoJ119XG5gYGBcbntmWydjb250ZW50J119XG5gYGAiKQogICAgICAgIGlmIGN0eFsic3RydWN0dXJlIl06CiAgICAgICAgICAgIGxpbmVzLmFwcGVuZCgiXG4jIyBQcm9qZWN0IFN0cnVjdHVyZSAodG9wLWxldmVsKSIpCiAgICAgICAgICAgIGZvciBzIGluIGN0eFsic3RydWN0dXJlIl1bOjI1XTogbGluZXMuYXBwZW5kKGYiICB7c30iKQogICAgbGluZXMuYXBwZW5kKCJcbkJlIGNvbmNpc2UsIGhlbHBmdWwsIGFuZCB3cml0ZSBjb2RlIGluIFBlcnNpYW4gb3IgRW5nbGlzaC4iKQogICAgcmV0dXJuICJcbiIuam9pbihsaW5lcykKCmRlZiBjYWxsX2FwaShtZXNzYWdlcywgY29uZik6CiAgICBiYXNlID0gKGNvbmYuZ2V0KCJhcGlfYmFzZV91cmwiKSBvciAiIikucnN0cmlwKCIvIikKICAgIGtleSAgPSBjb25mLmdldCgiYXBpX2tleSIpIG9yICIiCiAgICBtb2RlbD0gY29uZi5nZXQoIm1vZGVsIikgb3IgImdwdC01LWNvZGV4IgogICAgaWYgbm90IGJhc2Ugb3Igbm90IGtleTogcmV0dXJuIE5vbmUsICJDb25maWcgbWlzc2luZyBhcGlfYmFzZV91cmwgb3IgYXBpX2tleSIKICAgIHVybCA9IGYie2Jhc2V9L3YxL2NoYXQvY29tcGxldGlvbnMiCiAgICBib2R5ID0ganNvbi5kdW1wcyh7Im1vZGVsIjptb2RlbCwibWVzc2FnZXMiOm1lc3NhZ2VzLCJ0ZW1wZXJhdHVyZSI6MC43LCJtYXhfdG9rZW5zIjoyMDQ4fSkuZW5jb2RlKCkKICAgIHJlcSA9IHVybGxpYi5yZXF1ZXN0LlJlcXVlc3QodXJsLCBkYXRhPWJvZHksIG1ldGhvZD0iUE9TVCIpCiAgICByZXEuYWRkX2hlYWRlcigiQ29udGVudC1UeXBlIiwiYXBwbGljYXRpb24vanNvbiIpCiAgICByZXEuYWRkX2hlYWRlcigiQXV0aG9yaXphdGlvbiIsIGYiQmVhcmVyIHtrZXl9IikKICAgIHRyeToKICAgICAgICB3aXRoIHVybGxpYi5yZXF1ZXN0LnVybG9wZW4ocmVxLCB0aW1lb3V0PTYwKSBhcyByOgogICAgICAgICAgICBkID0ganNvbi5sb2FkcyhyLnJlYWQoKSkKICAgICAgICAgICAgcmV0dXJuIGRbImNob2ljZXMiXVswXVsibWVzc2FnZSJdWyJjb250ZW50Il0sIE5vbmUKICAgIGV4Y2VwdCB1cmxsaWIuZXJyb3IuSFRUUEVycm9yIGFzIGU6CiAgICAgICAgYiA9IGUucmVhZCgpLmRlY29kZShlcnJvcnM9Imlnbm9yZSIpCiAgICAgICAgcmV0dXJuIE5vbmUsIGYiSFRUUCB7ZS5jb2RlfToge2JbOjIwMF19IgogICAgZXhjZXB0IEV4Y2VwdGlvbiBhcyBlOiByZXR1cm4gTm9uZSwgc3RyKGUpCgpkZWYgbG9hZF9oaXN0KGNwKToKICAgIHRyeToKICAgICAgICB3aXRoIG9wZW4oZiJ7Y3B9Lmhpc3RvcnkuanNvbiIpIGFzIGY6IHJldHVybiBqc29uLmxvYWQoZikKICAgIGV4Y2VwdCBFeGNlcHRpb246IHJldHVybiBbXQoKZGVmIHNhdmVfaGlzdChjcCwgaCk6CiAgICB3aXRoIG9wZW4oZiJ7Y3B9Lmhpc3RvcnkuanNvbiIsInciKSBhcyBmOiBqc29uLmR1bXAoaCwgZiwgZW5zdXJlX2FzY2lpPUZhbHNlLCBpbmRlbnQ9MikKZGVmIGNtZF9jaGF0KGFyZ3MpOgogICAgcHJvaiA9IGFyZ3MucHJvamVjdCBvciBvcy5nZXRjd2QoKQogICAgY29uZiwgY3BhdGggPSBsb2FkX3Byb2plY3RfY29uZihwcm9qKQogICAgaWYgbm90IGNvbmY6IHByaW50KCJbcmVkXU5vIEFJIGNvbmZpZy4gUnVuICdwdXNoaXQtYWktYWdlbnQgc2V0dXAnIGZpcnN0LlsvcmVkXSIpOyBzeXMuZXhpdCgxKQogICAgc3lzdCA9IGJ1aWxkX3N5c3RlbV9wcm9tcHQocHJvaiwgYXJncy51c2VyIG9yIG9zLmVudmlyb24uZ2V0KCJVU0VSIiwiIikpCiAgICBoaXN0ID0gbG9hZF9oaXN0KGNwYXRoKQogICAgaWYgbm90IGhpc3Qgb3IgaGlzdFswXS5nZXQoInJvbGUiKSAhPSAic3lzdGVtIjoKICAgICAgICBoaXN0Lmluc2VydCgwLCB7InJvbGUiOiJzeXN0ZW0iLCJjb250ZW50IjpzeXN0fSkKICAgIHByaW50KGYiXG57Jz0nKjUwfVxuICBQdXNoaXQgQUkgQWdlbnQgIMK3ICBQcm92aWRlcjp7Y29uZi5nZXQoJ3Byb3ZpZGVyJywnLScpfSAgTW9kZWw6e2NvbmYuZ2V0KCdtb2RlbCcsJy0nKX1cbiAgUHJvamVjdDp7cHJvan1cbnsnPScqNTB9IikKICAgIHByaW50KCJUeXBlIGV4aXQvQ3RybCtEIHRvIGxlYXZlLiAvY29udGV4dCByZWxvYWQgL2NsZWFyIGVyYXNlIC9zdGF0dXMgc2hvdyIpCiAgICB3aGlsZSBUcnVlOgogICAgICAgIHRyeTogaW5wID0gaW5wdXQoIj4gIikuc3RyaXAoKQogICAgICAgIGV4Y2VwdCAoRU9GRXJyb3IsIEtleWJvYXJkSW50ZXJydXB0KTogcHJpbnQoIlxuQnllISIpOyBicmVhawogICAgICAgIGlmIG5vdCBpbnA6IGNvbnRpbnVlCiAgICAgICAgaWYgaW5wLmxvd2VyKCkgaW4gKCJleGl0IiwicXVpdCIpOiBwcmludCgiQnllISIpOyBicmVhawogICAgICAgIGlmIGlucCA9PSAiL2NsZWFyIjoKICAgICAgICAgICAgaGlzdCA9IFtoaXN0WzBdXSBpZiBoaXN0IGFuZCBoaXN0WzBdLmdldCgicm9sZSIpPT0ic3lzdGVtIiBlbHNlIFtdCiAgICAgICAgICAgIHNhdmVfaGlzdChjcGF0aCwgaGlzdCk7IHByaW50KCJbb2tdIGNsZWFyZWRcbiIpOyBjb250aW51ZQogICAgICAgIGlmIGlucCA9PSAiL2NvbnRleHQiOgogICAgICAgICAgICBzeXN0ID0gYnVpbGRfc3lzdGVtX3Byb21wdChwcm9qLCBhcmdzLnVzZXIgb3Igb3MuZW52aXJvbi5nZXQoIlVTRVIiLCIiKSkKICAgICAgICAgICAgaWYgaGlzdDogaGlzdFswXVsiY29udGVudCJdID0gc3lzdAogICAgICAgICAgICBzYXZlX2hpc3QoY3BhdGgsIGhpc3QpOyBwcmludCgiW29rXSBjb250ZXh0IHJlbG9hZGVkXG4iKTsgY29udGludWUKICAgICAgICBpZiBpbnAgPT0gIi9zdGF0dXMiOgogICAgICAgICAgICBwcmludChmIiAgUHJvdmlkZXI6e2NvbmYuZ2V0KCdwcm92aWRlcicsJy0nKX0gIE1vZGVsOntjb25mLmdldCgnbW9kZWwnLCctJyl9ICBNc2dzOntsZW4oW2ggZm9yIGggaW4gaGlzdCBpZiBoLmdldCgncm9sZScpPT0ndXNlciddKX1cbiIpOyBjb250aW51ZQogICAgICAgIGhpc3QuYXBwZW5kKHsicm9sZSI6InVzZXIiLCJjb250ZW50IjppbnB9KQogICAgICAgIHByaW50KCLij7MgIiwgZW5kPSIiLCBmbHVzaD1UcnVlKQogICAgICAgIHJlc3AsIGVyciA9IGNhbGxfYXBpKGhpc3QsIGNvbmYpCiAgICAgICAgcHJpbnQoIlxyICAgIiwgZW5kPSJcciIpCiAgICAgICAgaWYgZXJyOiBwcmludChmIltlcnJvcl0ge2Vycn0iKTsgaGlzdC5wb3AoKTsgcHJpbnQoKTsgY29udGludWUKICAgICAgICBoaXN0LmFwcGVuZCh7InJvbGUiOiJhc3Npc3RhbnQiLCJjb250ZW50IjpyZXNwfSkKICAgICAgICBpZiBsZW4oaGlzdCkgPiA0MjogaGlzdCA9IFtoaXN0WzBdXSArIGhpc3RbLTQwOl0KICAgICAgICBzYXZlX2hpc3QoY3BhdGgsIGhpc3QpCiAgICAgICAgcHJpbnQodGV4dHdyYXAuZmlsbChyZXNwLCB3aWR0aD04MCkpOyBwcmludCgpCmRlZiBjbWRfcXVlcnkoYXJncyk6CiAgICBwcm9qID0gYXJncy5wcm9qZWN0IG9yIG9zLmdldGN3ZCgpCiAgICBjb25mLCBfID0gbG9hZF9wcm9qZWN0X2NvbmYocHJvaikKICAgIGlmIG5vdCBjb25mOiBwcmludCgiTm8gQUkgY29uZmlnLiIsIGZpbGU9c3lzLnN0ZGVycik7IHN5cy5leGl0KDEpCiAgICBtc2dzID0gW3sicm9sZSI6InN5c3RlbSIsImNvbnRlbnQiOmJ1aWxkX3N5c3RlbV9wcm9tcHQocHJvaiwgIiIpfSwgeyJyb2xlIjoidXNlciIsImNvbnRlbnQiOmFyZ3MucHJvbXB0fV0KICAgIHJlc3AsIGVyciA9IGNhbGxfYXBpKG1zZ3MsIGNvbmYpCiAgICBpZiBlcnI6IHByaW50KGYiRXJyb3I6IHtlcnJ9IiwgZmlsZT1zeXMuc3RkZXJyKTsgc3lzLmV4aXQoMSkKICAgIHByaW50KHJlc3ApCgpkZWYgY21kX3NlcnZlKGFyZ3MpOgogICAgaW1wb3J0IGh0dHAuc2VydmVyLCBzb2NrZXRzZXJ2ZXIKICAgIFBPUlQgPSBhcmdzLnBvcnQgb3IgODc2NQogICAgY2xhc3MgSChodHRwLnNlcnZlci5CYXNlSFRUUFJlcXVlc3RIYW5kbGVyKToKICAgICAgICBkZWYgZG9fUE9TVChzZWxmKToKICAgICAgICAgICAgbG4gPSBpbnQoc2VsZi5oZWFkZXJzLmdldCgiQ29udGVudC1MZW5ndGgiLCAwKSkKICAgICAgICAgICAgYm9keSA9IGpzb24ubG9hZHMoc2VsZi5yZmlsZS5yZWFkKGxuKSkgaWYgbG4gZWxzZSB7fQogICAgICAgICAgICBtc2dzICA9IGJvZHkuZ2V0KCJtZXNzYWdlcyIsIFtdKQogICAgICAgICAgICBwcm9qICA9IGJvZHkuZ2V0KCJwcm9qZWN0X3BhdGgiLCAiIikKICAgICAgICAgICAgY29uZiwgY3AgPSBsb2FkX3Byb2plY3RfY29uZihwcm9qKSBpZiBwcm9qIGVsc2UgKE5vbmUsIE5vbmUpCiAgICAgICAgICAgIGlmIG5vdCBjb25mOiBjb25mLCBjcCA9IGxvYWRfcHJvamVjdF9jb25mKCIiKQogICAgICAgICAgICBpZiBub3QgY29uZjogc2VsZi5faih7ImVycm9yIjoiTm8gY29uZmlnIn0sIDUwMyk7IHJldHVybgogICAgICAgICAgICBzeXN0ID0gYnVpbGRfc3lzdGVtX3Byb21wdChwcm9qLCAiIikgaWYgcHJvaiBlbHNlICIiCiAgICAgICAgICAgIGhpc3QgPSBsb2FkX2hpc3QoY3ApCiAgICAgICAgICAgIGlmIHN5c3QgYW5kIChub3QgaGlzdCBvciBoaXN0WzBdLmdldCgicm9sZSIpIT0ic3lzdGVtIik6CiAgICAgICAgICAgICAgICBoaXN0Lmluc2VydCgwLCB7InJvbGUiOiJzeXN0ZW0iLCJjb250ZW50IjpzeXN0fSkKICAgICAgICAgICAgZWxpZiBub3Qgc3lzdCBhbmQgaGlzdCBhbmQgaGlzdFswXS5nZXQoInJvbGUiKT09InN5c3RlbSI6IGhpc3QgPSBoaXN0WzE6XQogICAgICAgICAgICBmb3IgbSBpbiBtc2dzOiBoaXN0LmFwcGVuZChtKQogICAgICAgICAgICByZXNwLCBlcnIgPSBjYWxsX2FwaShoaXN0LCBjb25mKQogICAgICAgICAgICBpZiBlcnI6IHNlbGYuX2ooeyJlcnJvciI6ZXJyfSwgNTAwKTsgcmV0dXJuCiAgICAgICAgICAgIGhpc3QuYXBwZW5kKHsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOnJlc3B9KQogICAgICAgICAgICBpZiBsZW4oaGlzdCkgPiA0MjogaGlzdCA9IFtoaXN0WzBdXSArIGhpc3RbLTQwOl0gaWYgaGlzdFswXS5nZXQoInJvbGUiKT09InN5c3RlbSIgZWxzZSBoaXN0Wy00MDpdCiAgICAgICAgICAgIHNhdmVfaGlzdChjcCwgaGlzdCkKICAgICAgICAgICAgc2VsZi5faih7InJlc3BvbnNlIjpyZXNwLCJoaXN0b3J5IjpoaXN0fSkKICAgICAgICBkZWYgX2ooc2VsZiwgZCwgc3Q9MjAwKToKICAgICAgICAgICAgYiA9IGpzb24uZHVtcHMoZCwgZW5zdXJlX2FzY2lpPUZhbHNlKS5lbmNvZGUoKQogICAgICAgICAgICBzZWxmLnNlbmRfcmVzcG9uc2Uoc3QpOyBzZWxmLnNlbmRfaGVhZGVyKCJDb250ZW50LVR5cGUiLCJhcHBsaWNhdGlvbi9qc29uIikKICAgICAgICAgICAgc2VsZi5zZW5kX2hlYWRlcigiQ29udGVudC1MZW5ndGgiLCBsZW4oYikpOyBzZWxmLmVuZF9oZWFkZXJzKCk7IHNlbGYud2ZpbGUud3JpdGUoYikKICAgICAgICBkZWYgZG9fR0VUKHNlbGYpOiBzZWxmLl9qKHsic2VydmljZSI6InB1c2hpdC1haSIsInN0YXR1cyI6InJ1bm5pbmcifSkKICAgICAgICBkZWYgbG9nX21lc3NhZ2Uoc2VsZiwgKmEpOiBwYXNzCiAgICB3aXRoIHNvY2tldHNlcnZlci5UQ1BTZXJ2ZXIoKCIxMjcuMC4wLjEiLCBQT1JUKSwgSCkgYXMgc3J2OgogICAgICAgIHByaW50KGYiUHVzaGl0IEFJIFNlcnZlciBvbiBodHRwOi8vMTI3LjAuMC4xOntQT1JUfSAgKEN0cmwrQyB0byBzdG9wKSIpCiAgICAgICAgdHJ5OiBzcnYuc2VydmVfZm9yZXZlcigpCiAgICAgICAgZXhjZXB0IEtleWJvYXJkSW50ZXJydXB0OiBwcmludCgiXG5TdG9wcGVkLiIpOyBzeXMuZXhpdCgwKQpkZWYgY21kX3N0YXR1cyhhcmdzKToKICAgIGNvbmYsIGNwID0gbG9hZF9wcm9qZWN0X2NvbmYoYXJncy5wcm9qZWN0IG9yICIiKQogICAgaWYgbm90IGNvbmY6IHByaW50KCJObyBBSSBjb25maWcuIik7IHN5cy5leGl0KDEpCiAgICBrID0gY29uZi5nZXQoImFwaV9rZXkiLCIiKQogICAgcHJpbnQoZiJDb25maWcgOiB7Y3B9IikKICAgIHByaW50KGYiUHJvdmlkZXI6e2NvbmYuZ2V0KCdwcm92aWRlcicsJy0nKX0gIE1vZGVsOntjb25mLmdldCgnbW9kZWwnLCctJyl9IikKICAgIHByaW50KGYiQmFzZSBVUkw6e2NvbmYuZ2V0KCdhcGlfYmFzZV91cmwnLCctJyl9IikKICAgIHByaW50KGYiQVBJIEtleSA6IHtrWzo0XX0qKioqe2tbLTI6XSBpZiBsZW4oayk+NiBlbHNlICcnfSIpCiAgICBwcmludChmIkVuYWJsZWQ6e2NvbmYuZ2V0KCdlbmFibGVkJyxGYWxzZSl9ICBJbnN0YWxsZWQ6e2NvbmYuZ2V0KCdpbnN0YWxsZWQnLEZhbHNlKX0iKQoKZGVmIGNtZF9zZXR1cChhcmdzKToKICAgIHByaW50KCItLS0gUHVzaGl0IEFJIFNldHVwIC0tLVxuIikKICAgIHByb3YgPSBpbnB1dCgiUHJvdmlkZXIgWzlyb3V0ZXJdOiAiKSBvciAiOXJvdXRlciIKICAgIGJhc2UgPSBpbnB1dCgiQVBJIEJhc2UgVVJMIDogIikKICAgIGtleSAgPSBpbnB1dCgiQVBJIEtleSAgICAgIDogIikKICAgIG1vZGVsPSBpbnB1dCgiTW9kZWwgW2dwdC01LWNvZGV4XTogIikgb3IgImdwdC01LWNvZGV4IgogICAgb3MubWFrZWRpcnMoQUlfRElSLCBleGlzdF9vaz1UcnVlKQogICAgY29uZiA9IHsiZW5hYmxlZCI6VHJ1ZSwicHJvdmlkZXIiOnByb3YsImFwaV9iYXNlX3VybCI6YmFzZSwKICAgICAgICAgICAgImFwaV9rZXkiOmtleSwibW9kZWwiOm1vZGVsLCJzY29wZSI6InNlcnZlciIsInBlcm1pc3Npb25zIjp7fSwKICAgICAgICAgICAgImluc3RhbGxlZCI6VHJ1ZSwicnVubmluZyI6RmFsc2UsInVwZGF0ZWRfYXQiOmRhdGV0aW1lLnV0Y25vdygpLmlzb2Zvcm1hdCgpKyJaIn0KICAgIHdpdGggb3BlbihTRVJWRVJfQ09ORiwgInciKSBhcyBmOiBqc29uLmR1bXAoY29uZiwgZiwgaW5kZW50PTQpCiAgICBvcy5jaG1vZChTRVJWRVJfQ09ORiwgMG82MDApCiAgICBwcmludChmIlxuW29rXSBDb25maWcgc2F2ZWQgdG8ge1NFUlZFUl9DT05GfSIpCgpkZWYgbWFpbigpOgogICAgcCA9IGFyZ3BhcnNlLkFyZ3VtZW50UGFyc2VyKGRlc2NyaXB0aW9uPSJQdXNoaXQgQUkgQWdlbnQiKQogICAgcyA9IHAuYWRkX3N1YnBhcnNlcnMoZGVzdD0iY21kIikKICAgIHBjPXMuYWRkX3BhcnNlcigiY2hhdCIpOyAgcGMuYWRkX2FyZ3VtZW50KCItLXByb2plY3QiLCItcCIpOyBwYy5hZGRfYXJndW1lbnQoIi0tdXNlciIsIi11IikKICAgIHBxPXMuYWRkX3BhcnNlcigicXVlcnkiKTsgcHEuYWRkX2FyZ3VtZW50KCJwcm9tcHQiKTsgcHEuYWRkX2FyZ3VtZW50KCItLXByb2plY3QiLCItcCIpOyBwcS5hZGRfYXJndW1lbnQoIi0tdXNlciIsIi11IikKICAgIHBzPXMuYWRkX3BhcnNlcigic2VydmUiKTsgcHMuYWRkX2FyZ3VtZW50KCItLXBvcnQiLHR5cGU9aW50LGRlZmF1bHQ9ODc2NSkKICAgIHBzdD1zLmFkZF9wYXJzZXIoInN0YXR1cyIpO3BzdC5hZGRfYXJndW1lbnQoIi0tcHJvamVjdCIsIi1wIikKICAgIHN1PXMuYWRkX3BhcnNlcigic2V0dXAiKQogICAgYT1wLnBhcnNlX2FyZ3MoKQogICAgaWYgbm90IGEuY21kOiBwLnByaW50X2hlbHAoKTsgc3lzLmV4aXQoMCkKICAgIHsiY2hhdCI6Y21kX2NoYXQsInF1ZXJ5IjpjbWRfcXVlcnksInNlcnZlIjpjbWRfc2VydmUsInN0YXR1cyI6Y21kX3N0YXR1cywic2V0dXAiOmNtZF9zZXR1cH1bYS5jbWRdKGEpCgppZiBfX25hbWVfXyA9PSAiX19tYWluX18iOiBtYWluKCkK'
+os.makedirs('$PUSHIT_AI_DIR', exist_ok=True)
+open('$PUSHIT_AI_DIR/pushit-ai-agent.py', 'wb').write(base64.b64decode(d))
+os.chmod('$PUSHIT_AI_DIR/pushit-ai-agent.py', 0o755)
+print('Agent written')
+PYEOF
+        echo -e "${GREEN}Agent binary bundled${NC}"
+    fi
+    if [ ! -f "$PUSHIT_AI_DIR/templates/ai.php" ]; then
+        python3 << 'PYEOF'
+import base64, os
+d = 'PD9waHAKLyoqCiAqIFB1c2hpdCBBSSBBUEkgRW5kcG9pbnQKICogUGxhY2UgYXQ6IC9ob21lLzx1c2VyPi88ZG9tYWluPi9wdWJsaWMvYXBpL2FpLnBocAogKi8KaGVhZGVyKCdDb250ZW50LVR5cGU6IGFwcGxpY2F0aW9uL2pzb24nKTsKaGVhZGVyKCdBY2Nlc3MtQ29udHJvbC1BbGxvdy1PcmlnaW46IConKTsKaGVhZGVyKCdBY2Nlc3MtQ29udHJvbC1BbGxvdy1NZXRob2RzOiBQT1NULCBPUFRJT05TJyk7CmhlYWRlcignQWNjZXNzLUNvbnRyb2wtQWxsb3ctSGVhZGVyczogQ29udGVudC1UeXBlJyk7CmlmICgkX1NFUlZFUlsnUkVRVUVTVF9NRVRIT0QnXSA9PT0gJ09QVElPTlMnKSB7IGh0dHBfcmVzcG9uc2VfY29kZSgyMDQpOyBleGl0OyB9CgpkZWZpbmUoJ1BVU0hJVF9BSV9ESVInLCAgICAgJy9ldGMvcHVzaGl0L2FpJyk7CmRlZmluZSgnUFVTSElUX1NFUlZFUl9DT05GJywgUFVTSElUX0FJX0RJUiAuICcvc2VydmVyLmpzb24nKTsKCmZ1bmN0aW9uIGFpX2xvYWRfanNvbihzdHJpbmcgJHApOiBhcnJheSB7CiAgICByZXR1cm4gZmlsZV9leGlzdHMoJHApID8gKGpzb25fZGVjb2RlKGZpbGVfZ2V0X2NvbnRlbnRzKCRwKSwgdHJ1ZSkgPzogW10pIDogW107Cn0KZnVuY3Rpb24gYWlfc2F2ZV9qc29uKHN0cmluZyAkcCwgYXJyYXkgJGQpOiB2b2lkIHsKICAgIGlmICghaXNfZGlyKGRpcm5hbWUoJHApKSkgbWtkaXIoZGlybmFtZSgkcCksIDA3NTUsIHRydWUpOwogICAgZmlsZV9wdXRfY29udGVudHMoJHAsIGpzb25fZW5jb2RlKCRkLCBKU09OX1VORVNDQVBFRF9VTklDT0RFIHwgSlNPTl9QUkVUVFlfUFJJTlQpKTsKfQpmdW5jdGlvbiBhaV9nZXRfY29uZig/c3RyaW5nICRwcm9qZWN0X3BhdGggPSBudWxsKTogP2FycmF5IHsKICAgIGlmICgkcHJvamVjdF9wYXRoICYmIGZpbGVfZXhpc3RzKCJ7JHByb2plY3RfcGF0aH0vLnB1c2hpdC9haS9jb25maWcuanNvbiIpKSB7CiAgICAgICAgJGQgPSBhaV9sb2FkX2pzb24oInskcHJvamVjdF9wYXRofS8ucHVzaGl0L2FpL2NvbmZpZy5qc29uIik7CiAgICAgICAgaWYgKCFlbXB0eSgkZCkpIHJldHVybiAkZDsKICAgIH0KICAgIHJldHVybiBhaV9sb2FkX2pzb24oUFVTSElUX1NFUlZFUl9DT05GKTsKfQpmdW5jdGlvbiBhaV9nZXRfaGlzdG9yeShzdHJpbmcgJGNvbmZfcGF0aCk6IGFycmF5IHsKICAgIHJldHVybiBhaV9sb2FkX2pzb24oInskY29uZl9wYXRofS5oaXN0b3J5Lmpzb24iKTsKfQpmdW5jdGlvbiBhaV9zYXZlX2hpc3Rvcnkoc3RyaW5nICRjb25mX3BhdGgsIGFycmF5ICRoKTogdm9pZCB7CiAgICBhaV9zYXZlX2pzb24oInskY29uZl9wYXRofS5oaXN0b3J5Lmpzb24iLCAkaCk7Cn0KZnVuY3Rpb24gYWlfYnVpbGRfY29udGV4dChzdHJpbmcgJHByb2plY3RfcGF0aCk6IHN0cmluZyB7CiAgICAkcGFydHMgPSBbXTsKICAgICRrZXlzID0gWydSRUFETUUubWQnLCdwYWNrYWdlLmpzb24nLCdjb21wb3Nlci5qc29uJywnLmVudi5leGFtcGxlJywKICAgICAgICAgICAgICdyb3V0ZXMvd2ViLnBocCcsJ3JvdXRlcy9hcGkucGhwJywnYm9vdHN0cmFwL2FwcC5waHAnLAogICAgICAgICAgICAgJ3ZpdGUuY29uZmlnLmpzJywnRG9ja2VyZmlsZScsJ2RvY2tlci1jb21wb3NlLnltbCddOwogICAgZm9yZWFjaCAoJGtleXMgYXMgJGtmKSB7CiAgICAgICAgJGZ1bGwgPSAkcHJvamVjdF9wYXRoLicvJy4ka2Y7CiAgICAgICAgaWYgKGZpbGVfZXhpc3RzKCRmdWxsKSkgewogICAgICAgICAgICAkYyA9IHN1YnN0cihmaWxlX2dldF9jb250ZW50cygkZnVsbCksIDAsIDIwMDApOwogICAgICAgICAgICAkcGFydHNbXSA9ICIjIyMgeyRrZn1cbmBgYFxueyRjfVxuYGBgIjsKICAgICAgICB9CiAgICB9CiAgICAkc3RydWN0ID0gW107CiAgICAkcm9vdCA9IG5ldyBEaXJlY3RvcnlJdGVyYXRvcigkcHJvamVjdF9wYXRoKTsKICAgIGZvcmVhY2ggKCRyb290IGFzICRlKSB7CiAgICAgICAgaWYgKCRlLT5pc0RvdCgpKSBjb250aW51ZTsKICAgICAgICAkbiA9ICRlLT5nZXRGaWxlbmFtZSgpOwogICAgICAgIGlmIChpbl9hcnJheSgkbiwgWycuZ2l0JywndmVuZG9yJywnbm9kZV9tb2R1bGVzJ10pKSBjb250aW51ZTsKICAgICAgICAkc3RydWN0W10gPSAoJGUtPmlzRGlyKCk/J1tkaXJdICc6J1tmaWxlXScpLiRuOwogICAgfQogICAgJHBhcnRzW10gPSAiIyMgU3RydWN0dXJlXG4iLmltcGxvZGUoIlxuIiwgYXJyYXlfc2xpY2UoJHN0cnVjdCwgMCwgMzApKTsKICAgIHJldHVybiBpbXBsb2RlKCJcblxuIiwgJHBhcnRzKTsKfQpmdW5jdGlvbiBhaV9jYWxsX2FwaShhcnJheSAkbXNncywgYXJyYXkgJGNvbmYpOiBhcnJheSB7CiAgICAkYmFzZSA9IHJ0cmltKCRjb25mWydhcGlfYmFzZV91cmwnXT8/JycsICcvJyk7CiAgICAka2V5ICA9ICRjb25mWydhcGlfa2V5J10/PycnOwogICAgJG1vZGVsPSAkY29uZlsnbW9kZWwnXT8/J2dwdC01LWNvZGV4JzsKICAgIGlmIChlbXB0eSgkYmFzZSkgfHwgZW1wdHkoJGtleSkpIHJldHVybiBbJ2Vycm9yJz0+J01pc3NpbmcgY29uZmlnJ107CiAgICAkYm9keSA9IGpzb25fZW5jb2RlKFsnbW9kZWwnPT4kbW9kZWwsJ21lc3NhZ2VzJz0+JG1zZ3MsJ3RlbXBlcmF0dXJlJz0+MC43LCdtYXhfdG9rZW5zJz0+MjA0OF0pOwogICAgJGN0eCA9IHN0cmVhbV9jb250ZXh0X2NyZWF0ZShbJ2h0dHAnPT5bJ21ldGhvZCc9PidQT1NUJywnaGVhZGVyJz0+WyJDb250ZW50LVR5cGU6IGFwcGxpY2F0aW9uL2pzb24iLCJBdXRob3JpemF0aW9uOiBCZWFyZXIgeyRrZXl9Il0sJ2NvbnRlbnQnPT4kYm9keSwndGltZW91dCc9PjYwXV0pOwogICAgdHJ5IHsKICAgICAgICAkciA9IGZpbGVfZ2V0X2NvbnRlbnRzKCJ7JGJhc2V9L3YxL2NoYXQvY29tcGxldGlvbnMiLCBmYWxzZSwgJGN0eCk7CiAgICAgICAgJGQgPSBqc29uX2RlY29kZSgkciwgdHJ1ZSk7CiAgICAgICAgaWYgKCFpc3NldCgkZFsnY2hvaWNlcyddWzBdWydtZXNzYWdlJ11bJ2NvbnRlbnQnXSkpIHRocm93IG5ldyBFeGNlcHRpb24oJGRbJ2Vycm9yJ11bJ21lc3NhZ2UnXT8/J2JhZCByZXNwb25zZScpOwogICAgICAgIHJldHVybiBbJ3Jlc3BvbnNlJz0+JGRbJ2Nob2ljZXMnXVswXVsnbWVzc2FnZSddWydjb250ZW50J10sJ2Vycm9yJz0+bnVsbF07CiAgICB9IGNhdGNoIChFeGNlcHRpb24gJGUpIHsgcmV0dXJuIFsncmVzcG9uc2UnPT5udWxsLCdlcnJvcic9PiRlLT5nZXRNZXNzYWdlKCldOyB9Cn0KCiRpbnB1dCA9IGpzb25fZGVjb2RlKGZpbGVfZ2V0X2NvbnRlbnRzKCdwaHA6Ly9pbnB1dCcpLCB0cnVlKSA/PyBbXTsKJG1lc3NhZ2VzICAgPSAkaW5wdXRbJ21lc3NhZ2VzJ10gPz8gW107CiRwcm9qZWN0UGF0aD0gJGlucHV0Wydwcm9qZWN0X3BhdGgnXSA/PyAnJzsKCmlmIChlbXB0eSgkbWVzc2FnZXMpKSB7IGh0dHBfcmVzcG9uc2VfY29kZSg0MDApOyBlY2hvIGpzb25fZW5jb2RlKFsnZXJyb3InPT4nTm8gbWVzc2FnZXMnXSk7IGV4aXQ7IH0KJGNvbmYgICA9IGFpX2dldF9jb25mKCRwcm9qZWN0UGF0aCk7CiRjb25mUGF0aCA9ICRwcm9qZWN0UGF0aCA/ICJ7JHByb2plY3RQYXRofS8ucHVzaGl0L2FpL2NvbmZpZy5qc29uIiA6IFBVU0hJVF9TRVJWRVJfQ09ORjsKaWYgKGVtcHR5KCRjb25mKSkgeyBodHRwX3Jlc3BvbnNlX2NvZGUoNTAzKTsgZWNobyBqc29uX2VuY29kZShbJ2Vycm9yJz0+J0FJIGNvbmZpZyBub3QgZm91bmQnXSk7IGV4aXQ7IH0KCiRzeXN0ICA9ICJZb3UgYXJlIGEgaGVscGZ1bCBBSSBhc3Npc3RhbnQgaW50ZWdyYXRlZCBpbnRvIHRoZSBQdXNoaXQgc2VydmVyIG1hbmFnZXIuXG5cbiI7CmlmICgkcHJvamVjdFBhdGggJiYgaXNfZGlyKCRwcm9qZWN0UGF0aCkpICRzeXN0IC49ICIjIyBQcm9qZWN0IENvbnRleHRcbiIuYWlfYnVpbGRfY29udGV4dCgkcHJvamVjdFBhdGgpLiJcblxuIjsKJHN5c3QgLj0gIkJlIGNvbmNpc2UsIGhlbHBmdWwsIGFuZCB3cml0ZSBjb2RlIGluIFBlcnNpYW4gb3IgRW5nbGlzaC4iOwoKJGhpc3QgPSBhaV9nZXRfaGlzdG9yeSgkY29uZlBhdGgpOwppZiAoZW1wdHkoJGhpc3QpIHx8ICgkaGlzdFswXVsncm9sZSddPz8nJykgIT09ICdzeXN0ZW0nKQogICAgYXJyYXlfdW5zaGlmdCgkaGlzdCwgWydyb2xlJz0+J3N5c3RlbScsJ2NvbnRlbnQnPT4kc3lzdF0pOwplbHNlCiAgICAkaGlzdFswXVsnY29udGVudCddID0gJHN5c3Q7CmZvcmVhY2ggKCRtZXNzYWdlcyBhcyAkbSkgJGhpc3RbXSA9ICRtOwoKJHJlc3VsdCA9IGFpX2NhbGxfYXBpKCRoaXN0LCAkY29uZik7CmlmICgkcmVzdWx0WydyZXNwb25zZSddKSB7CiAgICAkaGlzdFtdID0gWydyb2xlJz0+J2Fzc2lzdGFudCcsJ2NvbnRlbnQnPT4kcmVzdWx0WydyZXNwb25zZSddXTsKICAgIGlmIChjb3VudCgkaGlzdCkgPiA0MikgJGhpc3QgPSBbJGhpc3RbMF1dICsgYXJyYXlfc2xpY2UoJGhpc3QsIC00MCk7CiAgICBhaV9zYXZlX2hpc3RvcnkoJGNvbmZQYXRoLCAkaGlzdCk7Cn0KaHR0cF9yZXNwb25zZV9jb2RlKCRyZXN1bHRbJ2Vycm9yJ10gPyA1MDAgOiAyMDApOwplY2hvIGpzb25fZW5jb2RlKFsncmVzcG9uc2UnPT4kcmVzdWx0WydyZXNwb25zZSddLCdoaXN0b3J5Jz0+JGhpc3QsJ2Vycm9yJz0+JHJlc3VsdFsnZXJyb3InXV0sIEpTT05fVU5FU0NBUEVEX1VOSUNPREUpOwo='
+os.makedirs('$PUSHIT_AI_DIR/templates', exist_ok=True)
+open('$PUSHIT_AI_DIR/templates/ai.php', 'wb').write(base64.b64decode(d))
+print('PHP endpoint bundled')
+PYEOF
+        echo -e "${GREEN}PHP endpoint bundled${NC}"
+    fi
+}
+
 
 deploy_site() {
     # A previous action (e.g. Delete Site) may have removed the directory the
@@ -1196,10 +1232,17 @@ EOF
     # Nginx Vhost
     mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
     VHOST_CONF="/etc/nginx/sites-available/$DOMAIN"
+    _DOTCOUNT=$(echo "$DOMAIN" | tr -cd '.' | wc -c)
+    if [ "$_DOTCOUNT" -ge 2 ]; then
+        # Already a subdomain — no need to add www.
+        SN_LINE="server_name ${DOMAIN};"
+    else
+        SN_LINE="server_name ${DOMAIN} www.${DOMAIN};"
+    fi
     cat <<EOF > "$VHOST_CONF"
 server {
     listen 80;
-    server_name $DOMAIN www.$DOMAIN;
+    $SN_LINE
     root /home/$USERNAME/$DOMAIN/public;
 
     add_header X-Frame-Options "SAMEORIGIN";
@@ -1228,12 +1271,32 @@ server {
     location ~ /\.(?!well-known).* {
         deny all;
     }
+
+    # -- Pushit AI endpoints --
+    location ^~ /api/ai.php {
+        fastcgi_pass unix:/var/run/php/php${PHP_VERSION}-fpm-$USERNAME.sock;
+        fastcgi_param SCRIPT_FILENAME \\${realpath_root}\\${fastcgi_script_name};
+        include fastcgi_params;
+    }
+    location = /api/ai-proxy {
+        proxy_pass http://127.0.0.1:8765;
+        proxy_set_header Host \\${host};
+        proxy_set_header X-Real-IP \\${remote_addr};
+        proxy_set_header X-Project-Path /home/$USERNAME/$DOMAIN;
+        proxy_read_timeout 90s;
+    }
 }
 EOF
     ln -sf "$VHOST_CONF" "/etc/nginx/sites-enabled/$DOMAIN"
     systemctl reload nginx
     
     echo -e "\e[32mSite $DOMAIN deployed. Root: /home/$USERNAME/$DOMAIN\e[0m"
+
+    # --- AI Agent (optional) ---
+    read -r -p "Install AI Agent for this site? (y/N): " INSTALL_AI
+    if [[ "$INSTALL_AI" =~ ^[Yy]$ ]]; then
+        ai_install_for_project "/home/$USERNAME/$DOMAIN" "$DOMAIN" "$USERNAME"
+    fi
 }
 
 
@@ -1247,6 +1310,8 @@ list_site_domains() {
     for f in /etc/nginx/sites-available/*; do
         [ -f "$f" ] || continue
         DN=$(basename "$f")
+        # Skip nginx config backups
+        case "$DN" in *.bak.*) continue ;; esac
         SN=$(grep -h "server_name" "$f" | head -n1 | sed 's/^[[:space:]]*server_name//;s/;//;s/^ *//')
         [ -z "$SN" ] && SN="(no server_name)"
         ROOT=$(grep -m1 "^[[:space:]]*root" "$f" | awk '{print $2}' | tr -d ';')
@@ -1315,6 +1380,7 @@ add_site_domain() {
         echo -e "${RED}nginx -t failed. Reverting.${NC}"; cp "$BACKUP" "$VHOST_CONF"; return 1
     fi
     systemctl reload nginx
+    rm -f "$BACKUP" 2>/dev/null || true
     echo -e "${GREEN}Domain '$NEW_DOMAIN' added to '$PRIMARY'. Both serve same site.${NC}"
     read -r -p "Issue/expand SSL to include '$NEW_DOMAIN' now? (y/n): " SSL_ANS
     if [[ "$SSL_ANS" =~ ^[yY] ]]; then
@@ -1373,6 +1439,7 @@ remove_site_domain() {
     echo "Updated:"; grep "server_name" "$VHOST_CONF" | sed 's/^[[:space:]]*/  /'
     if ! nginx -t 2>&1; then echo -e "${RED}nginx -t failed. Reverting.${NC}"; cp "$BACKUP" "$VHOST_CONF"; return 1; fi
     systemctl reload nginx
+    rm -f "$BACKUP" 2>/dev/null || true
     echo -e "${GREEN}Removed '$RM_DOMAIN' from '$PRIMARY'.${NC}"
     REM=$(grep -h "server_name" "$VHOST_CONF" | sed 's/.*server_name//;s/;//' | tr ' ' '\n' | grep -v '^$' | sort -u | xargs)
     ARGS=""; for d in $REM; do ARGS="$ARGS -d $d"; done
@@ -1388,6 +1455,7 @@ manage_sites() {
         echo "3) Add Domain to Site"
         echo "4) Remove Domain from Site"
         echo "5) List Sites & Domains"
+        echo "6) Manage Site AI Agents"
         echo "0) Back"
         read -r -p "Choice: " SITE_CHOICE
         case $SITE_CHOICE in
@@ -1396,6 +1464,7 @@ manage_sites() {
             3) add_site_domain ;;
             4) remove_site_domain ;;
             5) list_site_domains ;;
+            6) manage_project_ai ;;
             0) break ;;
             *) echo -e "\e[31mInvalid choice.\e[0m" ;;
         esac
@@ -2169,6 +2238,642 @@ _dns_test_dns() {
     echo ""; echo "--- ping -c1 $D ---"
     ping -c1 -W3 "$D" 2>&1 | head -n 10 || echo "(ping failed)"
 }
+# =========================================================================
+# AI Agent — Server & Project management
+# =========================================================================
+
+# JSON helpers (no jq dependency)
+_ai_json_get() {
+    local _f="$1" _k="$2"
+    grep -o "\"${_k}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$_f" 2>/dev/null \
+        | sed 's/.*:[[:space:]]*"\([^"]*\)"/\1/' | head -n1
+}
+_ai_json_get_bool() {
+    local _f="$1" _k="$2"
+    grep -o "\"${_k}\"[[:space:]]*:[[:space:]]*[a-z]*" "$_f" 2>/dev/null \
+        | sed -E 's/.*:[[:space:]]*//' | head -n1
+}
+_ai_json_set() {
+    local _f="$1" _k="$2" _v="$3"
+    mkdir -p "$(dirname "$_f")" 2>/dev/null || true
+    if [ -f "$_f" ] && grep -q "\"${_k}\"" "$_f" 2>/dev/null; then
+        local tmpf
+        tmpf=$(mktemp)
+        while IFS= read -r line; do
+            if echo "$line" | grep -q "\"${_k}\"[[:space:]]*:"; then
+                printf '    "%s": "%s",\n' "$_k" "$_v"
+            else
+                echo "$line"
+            fi
+        done < "$_f" > "$tmpf"
+        mv "$tmpf" "$_f"
+    else
+        local tmpf
+        tmpf=$(mktemp)
+        local total
+        total=$(wc -l < "$_f")
+        while IFS= read -r line; do
+            total=$((total - 1))
+            if [ $total -eq 0 ] && echo "$line" | grep -q '^}'; then
+                printf '    "%s": "%s",\n' "$_k" "$_v"
+                echo "$line"
+            else
+                echo "$line"
+            fi
+        done < "$_f" > "$tmpf"
+        mv "$tmpf" "$_f"
+    fi
+}
+_ai_mask_key() {
+    local k="$1"
+    if [ ${#k} -le 6 ]; then
+        echo "${k:0:2}****"
+    else
+        local masked
+        masked=$(printf '%*s' $((${#k}-6)) '' | tr ' ' '*')
+        echo "${k:0:4}${masked}${k: -2}"
+    fi
+}
+
+_ai_write_conf() {
+    local _conf="$1" _provider="$2" _baseurl="$3" _apikey="$4" _model="$5"
+    mkdir -p "$(dirname "$_conf")" 2>/dev/null || true
+    cat > "$_conf" <<JSONEOF
+{
+    "enabled": true,
+    "provider": "${_provider}",
+    "api_base_url": "${_baseurl}",
+    "api_key": "${_apikey}",
+    "model": "${_model}",
+    "scope": "${SCOPE:-project}",
+    "version": "${PUSHIT_VERSION}",
+    "permissions": {
+        "read_files": false,
+        "write_files": false,
+        "execute_commands": false,
+        "git": false,
+        "database_read": false,
+        "database_write": false,
+        "manage_services": false,
+        "manage_nginx": false,
+        "manage_ssl": false
+    },
+    "installed": false,
+    "running": false,
+    "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+JSONEOF
+    chmod 600 "$_conf"
+}
+_ai_conf_get() {
+    local _conf="$1" _key="$2" _default="${3:-}"
+    if [ -f "$_conf" ]; then
+        local val
+        val=$(_ai_json_get "$_conf" "$_key")
+        echo "${val:-$_default}"
+    else
+        echo "$_default"
+    fi
+}
+_ai_bin_exists() {
+    [ -x "$PUSHIT_AI_BIN" ]
+}
+
+# ── Install AI Agent binary & systemd units ─────────────────────────────
+install_ai_agent() {
+    local SRC_AGENT="$PUSHIT_AI_DIR/pushit-ai-agent.py"
+    local SRC_PHP="$PUSHIT_AI_DIR/templates/ai.php"
+    # Copy agent script
+    if [ ! -f "$SRC_AGENT" ]; then
+        echo -e "${RED}Agent source not found at $SRC_AGENT.${NC}"
+        return 1
+    fi
+    install -m 0755 "$SRC_AGENT" "$PUSHIT_AI_BIN" 2>/dev/null || cp "$SRC_AGENT" "$PUSHIT_AI_BIN" && chmod +x "$PUSHIT_AI_BIN"
+    if [ -x "$PUSHIT_AI_BIN" ]; then
+        _ai_json_set "$PUSHIT_AI_SERVER_CONF" "installed" "true"
+        _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo -e "${GREEN}Agent binary installed at $PUSHIT_AI_BIN${NC}"
+    else
+        echo -e "${RED}Failed to install agent binary.${NC}"
+        return 1
+    fi
+    # Create systemd server service
+    if [ ! -f /etc/systemd/system/pushit-ai-server.service ]; then
+        cat > /etc/systemd/system/pushit-ai-server.service <<SVEOF
+[Unit]
+Description=Pushit AI Server Agent
+After=network.target
+[Service]
+Type=simple
+ExecStart=$PUSHIT_AI_BIN serve --port 8765
+WorkingDirectory=/root
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:$PUSHIT_AI_LOG_DIR/server.log
+StandardError=append:$PUSHIT_AI_LOG_DIR/server.err.log
+[Install]
+WantedBy=multi-user.target
+SVEOF
+        systemctl daemon-reload
+        echo -e "${GREEN}systemd unit pushit-ai-server.service created.${NC}"
+    fi
+    # Create per-user systemd service template
+    if [ ! -f /etc/systemd/system/pushit-ai@.service ]; then
+        cat > /etc/systemd/system/pushit-ai@.service <<SVUEOF
+[Unit]
+Description=Pushit AI Agent for %i
+After=network.target
+[Service]
+Type=simple
+ExecStart=$PUSHIT_AI_BIN serve --port 876%i
+WorkingDirectory=/home/%i
+User=%i
+Group=%i
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/pushit-ai/%i.log
+StandardError=append:/var/log/pushit-ai/%i.err.log
+[Install]
+WantedBy=multi-user.target
+SVUEOF
+        systemctl daemon-reload
+        echo -e "${GREEN}systemd unit pushit-ai@.service template created.${NC}"
+    fi
+}
+
+# ── Deploy AI PHP endpoint to a project ─────────────────────────────────
+deploy_ai_php_endpoint() {
+    local project_path="$1" username="$2"
+    local SRC_PHP="$PUSHIT_AI_DIR/templates/ai.php"
+    local DEST_PHP="${project_path}/public/api/ai.php"
+    if [ ! -f "$SRC_PHP" ]; then
+        echo -e "${YELLOW}AI PHP endpoint template not found at $SRC_PHP. Skipping.${NC}"
+        return 0
+    fi
+    mkdir -p "$(dirname "$DEST_PHP")" 2>/dev/null || true
+    cp "$SRC_PHP" "$DEST_PHP"
+    chown -R "$username:$username" "$(dirname "$DEST_PHP")" 2>/dev/null || true
+    chmod 644 "$DEST_PHP"
+    echo -e "${GREEN}AI PHP endpoint deployed to $DEST_PHP${NC}"
+}
+
+ai_install_for_project() {
+    local project_path="$1" domain="$2" username="$3"
+    echo -e "
+--- Installing AI Agent for $domain ---"
+    local proj_conf="${project_path}/.pushit/ai/config.json"
+    mkdir -p "$(dirname "$proj_conf")" 2>/dev/null || true
+    local srv_provider srv_model srv_baseurl srv_apikey
+    srv_provider=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "provider" "$PUSHIT_AI_DEFAULT_PROVIDER")
+    srv_model=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "model" "$PUSHIT_AI_DEFAULT_MODEL")
+    srv_baseurl=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "api_base_url" "")
+    srv_apikey=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "api_key" "")
+    read -r -p "Provider [$srv_provider]: " AI_PROVIDER
+    AI_PROVIDER=${AI_PROVIDER:-$srv_provider}
+    read -r -p "API Base URL [$srv_baseurl]: " AI_BASEURL
+    AI_BASEURL=${AI_BASEURL:-$srv_baseurl}
+    read -r -s -p "API Key [$(_ai_mask_key "$srv_apikey")]: " AI_APIKEY
+    echo
+    AI_APIKEY=${AI_APIKEY:-$srv_apikey}
+    if [ -z "$AI_APIKEY" ]; then
+        echo -e "${RED}API Key is required.${NC}"
+        return 1
+    fi
+    read -r -p "Model [$srv_model]: " AI_MODEL
+    AI_MODEL=${AI_MODEL:-$srv_model}
+    SCOPE="project"
+    _ai_write_conf "$proj_conf" "$AI_PROVIDER" "$AI_BASEURL" "$AI_APIKEY" "$AI_MODEL"
+    chown -R "$username:$username" "$(dirname "$proj_conf")" 2>/dev/null || true
+    if [ ! -f "$PUSHIT_AI_SERVER_CONF" ]; then
+        mkdir -p "$PUSHIT_AI_DIR" 2>/dev/null || true
+        SCOPE="server"
+        _ai_write_conf "$PUSHIT_AI_SERVER_CONF" "$AI_PROVIDER" "$AI_BASEURL" "$AI_APIKEY" "$AI_MODEL"
+        chmod 600 "$PUSHIT_AI_SERVER_CONF"
+    fi
+    mkdir -p "$PUSHIT_AI_LOG_DIR" 2>/dev/null || true
+    # Try to install agent binary if source is present
+    install_ai_agent 2>/dev/null || true
+    # Deploy PHP endpoint
+    deploy_ai_php_endpoint "$project_path" "$username"
+    echo -e "${GREEN}AI Agent setup complete for $domain.${NC}"
+    echo -e "${GREEN}  Config : $proj_conf${NC}"
+    echo -e "${GREEN}  Endpoint: ${project_path}/public/api/ai.php${NC}"
+}
+
+_ai_list_projects() {
+    local _found=0
+    for d in /home/*/; do
+        local _user="$(basename "$d")"
+        for sd in "$d"*/; do
+            local _domain="$(basename "$sd")"
+            local _conf="${sd}.pushit/ai/config.json"
+            [ -f "$_conf" ] || continue
+            _found=1
+            local _provider _model _inst _run
+            _provider=$(_ai_conf_get "$_conf" "provider" "-")
+            _model=$(_ai_conf_get "$_conf" "model" "-")
+            _inst=$(_ai_conf_get "$_conf" "installed" "false")
+            _run=$(_ai_conf_get "$_conf" "running" "false")
+            local _status=""
+            [ "$_inst" = "true" ] && _status+="installed "
+            [ "$_run" = "true" ] && _status+="running"
+            [ -z "$_status" ] && _status="configured only"
+            echo -e "  ${GREEN}$_domain${NC}  user=$_user  provider=$_provider  model=$_model  [$_status]"
+        done
+    done
+    [ $_found -eq 0 ] && echo "  (no project AI configs found)"
+}
+
+# ── Manage Project AI Agents (sub-menu from Sites menu) ─────────────────
+manage_project_ai() {
+    while true; do
+        echo -e "\n--- Project AI Agents ---"
+        echo "1) List all Project AI configs"
+        echo "2) Manage a Project AI"
+        echo "0) Back"
+        read -r -p "Choice: " PAI_CHOICE
+        case $PAI_CHOICE in
+            1)
+                echo -e "\n=== Project AI Status ==="
+                _ai_list_projects
+                ;;
+            2)
+                echo -e "\nAvailable sites with AI config:"
+                local _idx=0 _sites=()
+                for d in /home/*/; do
+                    local _user="$(basename "$d")"
+                    for sd in "$d"*/; do
+                        local _domain="$(basename "$sd")"
+                        local _conf="${sd}.pushit/ai/config.json"
+                        [ -f "$_conf" ] || continue
+                        _idx=$((_idx + 1))
+                        _sites+=("$_domain|$_user|$_conf")
+                        local _p _m
+                        _p=$(_ai_conf_get "$_conf" "provider" "-")
+                        _m=$(_ai_conf_get "$_conf" "model" "-")
+                        echo "  $_idx) $_domain  ($_user)  $_p / $_m"
+                    done
+                done
+                if [ $_idx -eq 0 ]; then
+                    echo -e "${YELLOW}No project AI configs found.${NC} Deploy a site first or install AI during creation."
+                    continue
+                fi
+                read -r -p "Select site number: " PAI_SEL
+                if ! [[ "$PAI_SEL" =~ ^[0-9]+$ ]] || [ "$PAI_SEL" -lt 1 ] || [ "$PAI_SEL" -gt "$_idx" ]; then
+                    echo -e "${RED}Invalid selection.${NC}"
+                    continue
+                fi
+                local _sel="${_sites[$((PAI_SEL - 1))]}"
+                local _p_domain="${_sel%%|*}"; _sel="${_sel#*|}"
+                local _p_user="${_sel%%|*}"; _sel="${_sel#*|}"
+                local _p_conf="$_sel"
+                _manage_single_project_ai "$_p_domain" "$_p_user" "$_p_conf"
+                ;;
+            0) break ;;
+            *) echo -e "\e[31mInvalid choice.\e[0m" ;;
+        esac
+    done
+}
+# ── Permission manager ───────────────────────────────────────────────────
+_manage_permissions() {
+    local CONF="$1" LABEL="$2" USERNAME="$3"
+    local PERMS=("read_files" "write_files" "execute_commands" "git"
+                 "database_read" "database_write"
+                 "manage_services" "manage_nginx" "manage_ssl")
+    while true; do
+        echo -e "\n--- Permissions for $LABEL ---"
+        local i=1
+        for p in "${PERMS[@]}"; do
+            local v mark
+            v=$(_ai_json_get_bool "$CONF" "$p")
+            mark="[ ]"
+            [ "$v" = "true" ] && mark="[x]"
+            echo -e "  $i) $mark  $p"
+            i=$((i + 1))
+        done
+        echo "0) Save and Back"
+        read -r -p "Toggle permission number: " PNUM
+        case $PNUM in
+            0) break ;;
+            [0-9]*)
+                local idx=$((PNUM - 1))
+                if [ $idx -ge 0 ] && [ $idx -lt ${#PERMS[@]} ]; then
+                    local pm="${PERMS[$idx]}"
+                    local cur
+                    cur=$(_ai_json_get_bool "$CONF" "$pm")
+                    [ "$cur" = "true" ] && _ai_json_set "$CONF" "$pm" "false" || _ai_json_set "$CONF" "$pm" "true"
+                    _ai_json_set "$CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo -e "${GREEN}Updated: $pm${NC}"
+                fi
+                ;;
+            *) echo -e "${RED}Invalid.${NC}" ;;
+        esac
+    done
+}
+
+# ── Manage Server AI Agent ──────────────────────────────────────────────
+manage_server_ai() {
+    mkdir -p "$PUSHIT_AI_DIR" "$PUSHIT_AI_LOG_DIR" 2>/dev/null || true
+    while true; do
+        echo -e "\n--- Server AI Agent ---"
+        local _inst _run _prov _model _url _key
+        _inst=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "installed" "false")
+        _run=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "running" "false")
+        _prov=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "provider" "-")
+        _model=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "model" "-")
+        _url=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "api_base_url" "-")
+        _key=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "api_key" "")
+        echo -e "  Config    : $PUSHIT_AI_SERVER_CONF"
+        if _ai_bin_exists; then
+            echo -e "  Binary    : ${GREEN}$PUSHIT_AI_BIN${NC}"
+        else
+            echo -e "  Binary    : ${YELLOW}not installed yet${NC}"
+        fi
+        echo -e "  Installed : $_inst"
+        echo -e "  Running   : $_run"
+        echo -e "  Provider  : $_prov"
+        echo -e "  Model     : $_model"
+        echo -e "  API Base  : $_url"
+        echo -e "  API Key   : $(_ai_mask_key "$_key")"
+        echo ""
+        echo "1) Status (refresh)"
+        echo "2) Install Agent"
+        echo "3) Uninstall Agent"
+        echo "4) Start"
+        echo "5) Stop"
+        echo "6) Restart"
+        echo "7) Update"
+        echo "8) Change Provider"
+        echo "9) Change API Key"
+        echo "10) Change API Base URL"
+        echo "11) Change Model"
+        echo "12) Manage Permissions"
+        echo "13) Run CLI Chat ($PUSHIT_AI_BIN chat)"
+        echo "0) Back"
+        read -r -p "Choice: " SAI_CHOICE
+        case $SAI_CHOICE in
+            1)
+                if _ai_bin_exists; then
+                    echo -e "  Binary: ${GREEN}OK${NC}"
+                    if systemctl is-active --quiet "pushit-ai-server" 2>/dev/null; then
+                        echo -e "  Service: ${GREEN}running${NC}"
+                        _ai_json_set "$PUSHIT_AI_SERVER_CONF" "running" "true"
+                    else
+                        echo -e "  Service: ${YELLOW}stopped${NC}"
+                        _ai_json_set "$PUSHIT_AI_SERVER_CONF" "running" "false"
+                    fi
+                else
+                    echo -e "  Binary: ${YELLOW}not installed${NC}"
+                fi
+                echo "  Installed : $(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "installed" "false")"
+                echo "  Updated   : $(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "updated_at" "-")"
+                ;;
+            2)
+                echo -e "${YELLOW}Installing AI agent binary and systemd units...${NC}"
+                copy_ai_source_files
+                install_ai_agent || echo -e "${RED}Agent installation failed.${NC}"
+                _ai_json_set "$PUSHIT_AI_SERVER_CONF" "installed" "true"
+                _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                echo -e "${GREEN}Server AI agent installed.${NC}"
+                ;;
+            3)
+                read -r -p "Uninstall Server AI? (y/N): " SU
+                if [[ "$SU" =~ ^[Yy]$ ]]; then
+                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "installed" "false"
+                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "running" "false"
+                    systemctl stop "pushit-ai-server" 2>/dev/null || true
+                    echo -e "${GREEN}Server AI uninstalled.${NC}"
+                fi
+                ;;
+            4)
+                if _ai_bin_exists; then
+                    systemctl start "pushit-ai-server" 2>/dev/null || true
+                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "running" "true"
+                    echo -e "${GREEN}Started.${NC}"
+                else
+                    echo -e "${RED}Not installed yet.${NC}"
+                fi
+                ;;
+            5)
+                systemctl stop "pushit-ai-server" 2>/dev/null || true
+                _ai_json_set "$PUSHIT_AI_SERVER_CONF" "running" "false"
+                echo -e "${GREEN}Stopped.${NC}"
+                ;;
+            6)
+                if _ai_bin_exists; then
+                    systemctl restart "pushit-ai-server" 2>/dev/null || true
+                    echo -e "${GREEN}Restarted.${NC}"
+                else
+                    echo -e "${RED}Not installed.${NC}"
+                fi
+                ;;
+            7)
+                if _ai_bin_exists; then
+                    systemctl restart "pushit-ai-server" 2>/dev/null || true
+                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo -e "${GREEN}Update applied.${NC}"
+                fi
+                ;;
+            8)
+                read -r -p "New provider [$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "provider" "$PUSHIT_AI_DEFAULT_PROVIDER")]: " NPROV
+                NPROV=${NPROV:-$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "provider" "$PUSHIT_AI_DEFAULT_PROVIDER")}
+                _ai_json_set "$PUSHIT_AI_SERVER_CONF" "provider" "$NPROV"
+                _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                echo -e "${GREEN}Provider updated.${NC}"
+                ;;
+            9)
+                local ckey
+                ckey=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "api_key" "")
+                echo -e "  Current: $(_ai_mask_key "$ckey")"
+                read -r -s -p "New API Key: " NEWKEY
+                echo
+                if [ -n "$NEWKEY" ]; then
+                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "api_key" "$NEWKEY"
+                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo -e "${GREEN}API Key updated.${NC}"
+                fi
+                ;;
+            10)
+                local curl_v
+                curl_v=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "api_base_url" "")
+                echo -e "  Current: $curl_v"
+                read -r -p "New API Base URL: " NEWURL
+                if [ -n "$NEWURL" ]; then
+                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "api_base_url" "$NEWURL"
+                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo -e "${GREEN}Base URL updated.${NC}"
+                fi
+                ;;
+            11)
+                local cmodel
+                cmodel=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "model" "")
+                echo -e "  Current: $cmodel"
+                read -r -p "New model: " NEWMODEL
+                if [ -n "$NEWMODEL" ]; then
+                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "model" "$NEWMODEL"
+                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo -e "${GREEN}Model updated.${NC}"
+                fi
+                ;;
+            12)
+                _manage_permissions "$PUSHIT_AI_SERVER_CONF" "(server-wide)" "root"
+                ;;
+            13)
+                if _ai_bin_exists; then
+                    $PUSHIT_AI_BIN chat
+                else
+                    echo -e "${RED}Agent not installed. Choose option 2 first.${NC}"
+                fi
+                ;;
+            0) break ;;
+            *) echo -e "\e[31mInvalid choice.\e[0m" ;;
+        esac
+    done
+}
+_manage_single_project_ai() {
+    local DOMAIN="$1" USERNAME="$2" CONF="$3"
+    local PROJ_PATH="/home/$USERNAME/$DOMAIN"
+    while true; do
+        echo -e "\n--- AI Agent: $DOMAIN ---"
+        echo "Path       : $PROJ_PATH"
+        echo "Config     : $CONF"
+        local _prov _model _url _inst _run
+        _prov=$(_ai_conf_get "$CONF" "provider" "-")
+        _model=$(_ai_conf_get "$CONF" "model" "-")
+        _url=$(_ai_conf_get "$CONF" "api_base_url" "-")
+        _inst=$(_ai_conf_get "$CONF" "installed" "false")
+        _run=$(_ai_conf_get "$CONF" "running" "false")
+        echo -e "  Status      : ${GREEN}$_inst${NC}  Run   : ${GREEN}$_run${NC}"
+        echo -e "  Provider    : $_prov    Model : $_model"
+        echo -e "  API Base URL: $_url"
+        echo ""
+        echo "1) Status (refresh)"
+        echo "2) Install Agent"
+        echo "3) Uninstall Agent"
+        echo "4) Start"
+        echo "5) Stop"
+        echo "6) Restart"
+        echo "7) Update"
+        echo "8) Change Provider"
+        echo "9) Change API Key"
+        echo "10) Change API Base URL"
+        echo "11) Change Model"
+        echo "12) Manage Permissions"
+        echo "0) Back"
+        read -r -p "Choice: " PAI_SUB
+        case $PAI_SUB in
+            1)
+                echo "  Installed : $_inst"
+                echo "  Running   : $_run"
+                if _ai_bin_exists; then
+                    echo -e "  Binary    : ${GREEN}$PUSHIT_AI_BIN${NC}"
+                    if systemctl is-active --quiet "pushit-ai@$USERNAME" 2>/dev/null; then
+                        echo -e "  Service   : ${GREEN}running${NC}"
+                        _ai_json_set "$CONF" "running" "true"
+                    else
+                        echo -e "  Service   : ${YELLOW}stopped${NC}"
+                        _ai_json_set "$CONF" "running" "false"
+                    fi
+                else
+                    echo -e "  Binary    : ${YELLOW}not installed yet${NC}"
+                fi
+                ;;
+            2)
+                _ai_json_set "$CONF" "installed" "true"
+                _ai_json_set "$CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                echo -e "${GREEN}Marked as installed.${NC}"
+                ;;
+            3)
+                read -r -p "Uninstall for $DOMAIN? (y/N): " UC
+                if [[ "$UC" =~ ^[Yy]$ ]]; then
+                    _ai_json_set "$CONF" "installed" "false"
+                    _ai_json_set "$CONF" "running" "false"
+                    rm -f "/run/pushit-ai-${USERNAME}.pid" 2>/dev/null || true
+                    systemctl stop "pushit-ai@$USERNAME" 2>/dev/null || true
+                    echo -e "${GREEN}Uninstalled.${NC}"
+                fi
+                ;;
+            4)
+                if _ai_bin_exists; then
+                    systemctl start "pushit-ai@$USERNAME" 2>/dev/null || true
+                    _ai_json_set "$CONF" "running" "true"
+                    echo -e "${GREEN}Started.${NC}"
+                else
+                    echo -e "${RED}Not installed yet.${NC}"
+                fi
+                ;;
+            5)
+                systemctl stop "pushit-ai@$USERNAME" 2>/dev/null || true
+                _ai_json_set "$CONF" "running" "false"
+                echo -e "${GREEN}Stopped.${NC}"
+                ;;
+            6)
+                if _ai_bin_exists; then
+                    systemctl restart "pushit-ai@$USERNAME" 2>/dev/null || true
+                    echo -e "${GREEN}Restarted.${NC}"
+                else
+                    echo -e "${RED}Not installed.${NC}"
+                fi
+                ;;
+            7)
+                if _ai_bin_exists; then
+                    systemctl restart "pushit-ai@$USERNAME" 2>/dev/null || true
+                    _ai_json_set "$CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo -e "${GREEN}Update applied.${NC}"
+                fi
+                ;;
+            8)
+                read -r -p "New provider [$(_ai_conf_get "$CONF" "provider" "$PUSHIT_AI_DEFAULT_PROVIDER")]: " NP
+                NP=${NP:-$(_ai_conf_get "$CONF" "provider" "$PUSHIT_AI_DEFAULT_PROVIDER")}
+                _ai_json_set "$CONF" "provider" "$NP"
+                _ai_json_set "$CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                echo -e "${GREEN}Provider updated.${NC}"
+                ;;
+            9)
+                local cur_key
+                cur_key=$(_ai_conf_get "$CONF" "api_key" "")
+                echo -e "  Current key : $(_ai_mask_key "$cur_key")"
+                read -r -s -p "New API Key: " NK
+                echo
+                if [ -n "$NK" ]; then
+                    _ai_json_set "$CONF" "api_key" "$NK"
+                    _ai_json_set "$CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo -e "${GREEN}API Key updated.${NC}"
+                fi
+                ;;
+            10)
+                local cur_url
+                cur_url=$(_ai_conf_get "$CONF" "api_base_url" "")
+                echo -e "  Current URL : $cur_url"
+                read -r -p "New API Base URL: " NU
+                if [ -n "$NU" ]; then
+                    _ai_json_set "$CONF" "api_base_url" "$NU"
+                    _ai_json_set "$CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo -e "${GREEN}Base URL updated.${NC}"
+                fi
+                ;;
+            11)
+                local cur_model
+                cur_model=$(_ai_conf_get "$CONF" "model" "")
+                echo -e "  Current model : $cur_model"
+                read -r -p "New model: " NM
+                if [ -n "$NM" ]; then
+                    _ai_json_set "$CONF" "model" "$NM"
+                    _ai_json_set "$CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo -e "${GREEN}Model updated.${NC}"
+                fi
+                ;;
+            12)
+                _manage_permissions "$CONF" "$DOMAIN" "$USERNAME"
+                ;;
+            0) break ;;
+            *) echo -e "\e[31mInvalid choice.\e[0m" ;;
+        esac
+    done
+}
+
+
 manage_dns() {
     while true; do
         if [ -L /etc/resolv.conf ]; then LINK=" -> $(readlink /etc/resolv.conf)"; else LINK=""; fi
@@ -2261,6 +2966,7 @@ show_menu() {
         echo "12) Update Script (from GitHub)"
     fi
     echo -e "${RED}13) Uninstall Pushit (remove script & cache)${NC}"
+    echo "14) Manage Server AI Agent"
     read -r -p "Option [u=update]: " OPT
     # Shortcut: 'u' / 'U' triggers update when available, or anyway
     if [[ "$OPT" =~ ^[uU]$ ]]; then OPT="12"; fi
@@ -2279,6 +2985,7 @@ show_menu() {
         11) pushit_first_run_wizard ;;
         12) pushit_update_script ;;
         13) pushit_uninstall ;;
+        14) manage_server_ai ;;
         *) echo "Invalid option." ;;
     esac
 }
