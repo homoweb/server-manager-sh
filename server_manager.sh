@@ -865,7 +865,12 @@ install_stack() {
 
 # ── Copy AI Agent source to /etc/pushit/ai/ (bundled) ─────────────────────
 copy_ai_source_files() {
-    mkdir -p "$PUSHIT_AI_DIR/templates" 2>/dev/null || true
+    if [ ! -d "$PUSHIT_AI_DIR" ]; then
+        mkdir -p "$PUSHIT_AI_DIR/templates" || {
+            echo -e "${RED}Cannot create $PUSHIT_AI_DIR. Run with sudo.${NC}"
+            return 1
+        }
+    fi
     if [ ! -f "$PUSHIT_AI_DIR/pushit-ai-agent.py" ]; then
         python3 << 'PYEOF'
 import base64, os
@@ -2349,7 +2354,9 @@ install_ai_agent() {
         echo -e "${RED}Agent source not found at $SRC_AGENT.${NC}"
         return 1
     fi
-    install -m 0755 "$SRC_AGENT" "$PUSHIT_AI_BIN" 2>/dev/null || cp "$SRC_AGENT" "$PUSHIT_AI_BIN" && chmod +x "$PUSHIT_AI_BIN"
+    install -m 0755 "$SRC_AGENT" "$PUSHIT_AI_BIN" 2>/dev/null || {
+        cp "$SRC_AGENT" "$PUSHIT_AI_BIN" && chmod +x "$PUSHIT_AI_BIN"
+    }
     if [ -x "$PUSHIT_AI_BIN" ]; then
         _ai_json_set "$PUSHIT_AI_SERVER_CONF" "installed" "true"
         _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -2631,11 +2638,13 @@ manage_server_ai() {
                 ;;
             2)
                 echo -e "${YELLOW}Installing AI agent binary and systemd units...${NC}"
-                copy_ai_source_files
-                install_ai_agent || echo -e "${RED}Agent installation failed.${NC}"
-                _ai_json_set "$PUSHIT_AI_SERVER_CONF" "installed" "true"
-                _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                echo -e "${GREEN}Server AI agent installed.${NC}"
+                if copy_ai_source_files && install_ai_agent; then
+                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "installed" "true"
+                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo -e "${GREEN}Server AI agent installed.${NC}"
+                else
+                    echo -e "${RED}Agent installation failed.${NC}"
+                fi
                 ;;
             3)
                 read -r -p "Uninstall Server AI? (y/N): " SU
