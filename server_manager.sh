@@ -22,7 +22,7 @@ NPM_VERSION="12.0.2"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.17"
+PUSHIT_VERSION="0.1.18"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -787,7 +787,7 @@ install_stack() {
         focal|jammy|noble)
             add-apt-repository ppa:ondrej/php -y
             apt-get update
-            apt-get install -y "php${PHP_VERSION}-fpm" "php${PHP_VERSION}-cli" "php${PHP_VERSION}-mysql" \
+            apt-get install -y "php${PHP_VERSION}-fpm" "php${PHP_VERSION}-cli" "php${PHP_VERSION}-mysql" "php${PHP_VERSION}-pgsql" \
                 "php${PHP_VERSION}-redis" "php${PHP_VERSION}-xml" "php${PHP_VERSION}-mbstring" \
                 "php${PHP_VERSION}-curl" "php${PHP_VERSION}-zip" "php${PHP_VERSION}-gd" "php${PHP_VERSION}-bcmath"
             ;;
@@ -819,6 +819,12 @@ install_stack() {
         echo -e "${YELLOW}Manual: sudo apt-get update && sudo apt-get install -y mysql-server mysql-client && sudo systemctl enable --now mysql${NC}"
     fi
     
+    local postgres_ready=1
+    if ! install_postgresql; then
+        postgres_ready=0
+        echo -e "${YELLOW}PostgreSQL setup failed. Retry from Manage DB -> PostgreSQL -> Install PostgreSQL.${NC}"
+    fi
+
     # Node.js (re-running this option also upgrades an existing Node 20 to the version above)
     curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash -
     apt-get install -y nodejs
@@ -860,6 +866,10 @@ install_stack() {
 
     unset DEBIAN_FRONTEND
     copy_ai_source_files
+    if [ "$postgres_ready" -ne 1 ]; then
+        echo -e "${YELLOW}Stack installation finished, but PostgreSQL is not ready. Retry its installation from Manage DB.${NC}"
+        return 1
+    fi
     echo -e "${GREEN}Stack installed successfully.${NC}"
 }
 
@@ -1706,88 +1716,94 @@ download_database() {
 
     echo -e "${YELLOW}Dumping '${db_name}'... This may take a while for large databases.${NC}"
     if (set -o pipefail; mysqldump --single-transaction --routines --triggers --events --hex-blob "${db_name}" | gzip > "$DUMP_FILE"); then
-        chmod 600 "$DUMP_FILE"
-        local fsize
-        fsize=$(du -h "$DUMP_FILE" 2>/dev/null | cut -f1)
-        echo -e "${GREEN}Backup created: ${DUMP_FILE} (${fsize})${NC}"
-        # --- 10-min download link (reusable until expiry) ---
-        if ! command -v python3 >/dev/null 2>&1; then
-            echo -e "${YELLOW}python3 not found — installing for download server...${NC}"
-            apt-get update -qq 2>/dev/null && apt-get install -y -qq python3 2>/dev/null || true
-        fi
-        local token dl_file dl_meta expires expires_human dl_url
-        if command -v openssl >/dev/null 2>&1; then
-            token=$(openssl rand -hex 16 2>/dev/null)
-        fi
-        if [ -z "$token" ] || [ ${#token} -lt 16 ]; then
-            token=$(head -c 24 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 32)
-        fi
-        if [ -z "$token" ] || [ ${#token} -lt 16 ]; then
-            token=$(date +%s%N 2>/dev/null | sha256sum 2>/dev/null | head -c 32)
-        fi
-        token=$(echo "$token" | tr -dc 'a-zA-Z0-9' | head -c 32)
-        [ -z "$token" ] && token="$(date +%s)_$$"
-        mkdir -p "$PUSHIT_DL_DIR" 2>/dev/null || true
-        chmod 700 "$PUSHIT_DL_DIR" 2>/dev/null || true
-        dl_file="${PUSHIT_DL_DIR}/${token}"
-        dl_meta="${dl_file}.meta"
-        # Move dump into DL dir (keep original too for scp fallback? move to save space)
-        if cp -a "$DUMP_FILE" "$dl_file" 2>/dev/null || cp "$DUMP_FILE" "$dl_file" 2>/dev/null; then
-            chmod 600 "$dl_file" 2>/dev/null || true
-        else
-            echo -e "${RED}Failed to prepare download link file.${NC}"
-            dl_file="$DUMP_FILE"
-        fi
-        expires=$(( $(date +%s) + 600 ))
-        expires_human=$(date -d "@${expires}" "+%Y-%m-%d %H:%M:%S %Z" 2>/dev/null || date -r "$expires" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "in 10 minutes")
-        {
-            echo "filename=$(basename "$DUMP_FILE")"
-            echo "expires=${expires}"
-            echo "db=${db_name}"
-            echo "size=${fsize:-unknown}"
-            echo "created=$(date +%s)"
-        } > "$dl_meta" 2>/dev/null || true
-        chmod 600 "$dl_meta" 2>/dev/null || true
-        # Schedule deletion after 10 min (expiry)
-        ( sleep 600; rm -f "$dl_file" "$dl_meta" "$DUMP_FILE" 2>/dev/null ) >/dev/null 2>&1 &
-        disown 2>/dev/null || true
-        if command -v at >/dev/null 2>&1; then
-            echo "rm -f '$dl_file' '$dl_meta' '$DUMP_FILE' 2>/dev/null" | at now + 10 minutes 2>/dev/null || true
-        fi
-        # Ensure download server is running
-        pushit_dl_ensure_server 2>/dev/null || pushit_dl_init_python_server 2>/dev/null || true
-        dl_url=$(pushit_dl_build_url "$token" 2>/dev/null)
-        echo ""
-        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${GREEN} Download link (valid 10 min, reusable):${NC}"
-        echo -e "  ${YELLOW}${dl_url}${NC}"
-        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  ${YELLOW}Browser:${NC} open link above"
-        echo -e "  ${YELLOW}curl -O \"${dl_url}\"${NC}"
-        echo -e "  ${YELLOW}wget \"${dl_url}\"${NC}"
-        echo -e "  Expires: ${expires_human}  |  Size: ${fsize}  |  File: $(basename "$DUMP_FILE")"
-        echo -e "  ${RED}Link expires in 10 min — reusable until expiry.${NC}"
-        echo ""
-        SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-        _SSH_PORT=$(pushit_ssh_port)
-        echo -e "${GREEN}━━━━━━━━ Fallback: scp (if link fails) ━━━━━━━━${NC}"
-        echo -e "  ${YELLOW}File on server:${NC} ${DUMP_FILE}"
-        if [ "$_SSH_PORT" != "22" ]; then
-            echo -e "  ${YELLOW}From your PC:${NC}"
-            echo -e "    ${GREEN}scp -P ${_SSH_PORT} root@${SERVER_IP}:${DUMP_FILE} ./  ${YELLOW}← correct${NC}"
-            echo -e "  ${RED}Wrong:${NC} scp root@${SERVER_IP}:${_SSH_PORT}/...  ${YELLOW}(port goes with -P, not after :)${NC}"
-            echo -e "  ${YELLOW}SSH port is ${_SSH_PORT} (from sshd_config) — always use -P ${_SSH_PORT} for ssh/scp.${NC}"
-            echo -e "    ssh -p ${_SSH_PORT} root@${SERVER_IP}  ${YELLOW}(test connection)${NC}"
-        else
-            echo -e "  ${YELLOW}From your PC:${NC} scp root@${SERVER_IP}:${DUMP_FILE} ./"
-        fi
-        echo -e "  ${YELLOW}Note: file will be deleted after 10 min.${NC}"
-        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        pushit_db_publish_backup "$DUMP_FILE" "$db_name"
     else
         rm -f "$DUMP_FILE"
         echo -e "${RED}Dump failed. No backup file was kept.${NC}"
         return 1
     fi
+}
+
+pushit_db_publish_backup() {
+    local DUMP_FILE="$1" db_name="$2"
+    local SERVER_IP _SSH_PORT
+    chmod 600 "$DUMP_FILE"
+    local fsize
+    fsize=$(du -h "$DUMP_FILE" 2>/dev/null | cut -f1)
+    echo -e "${GREEN}Backup created: ${DUMP_FILE} (${fsize})${NC}"
+    # --- 10-min download link (reusable until expiry) ---
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo -e "${YELLOW}python3 not found — installing for download server...${NC}"
+        apt-get update -qq 2>/dev/null && apt-get install -y -qq python3 2>/dev/null || true
+    fi
+    local token dl_file dl_meta expires expires_human dl_url
+    if command -v openssl >/dev/null 2>&1; then
+        token=$(openssl rand -hex 16 2>/dev/null)
+    fi
+    if [ -z "$token" ] || [ ${#token} -lt 16 ]; then
+        token=$(head -c 24 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 32)
+    fi
+    if [ -z "$token" ] || [ ${#token} -lt 16 ]; then
+        token=$(date +%s%N 2>/dev/null | sha256sum 2>/dev/null | head -c 32)
+    fi
+    token=$(echo "$token" | tr -dc 'a-zA-Z0-9' | head -c 32)
+    [ -z "$token" ] && token="$(date +%s)_$$"
+    mkdir -p "$PUSHIT_DL_DIR" 2>/dev/null || true
+    chmod 700 "$PUSHIT_DL_DIR" 2>/dev/null || true
+    dl_file="${PUSHIT_DL_DIR}/${token}"
+    dl_meta="${dl_file}.meta"
+    # Move dump into DL dir (keep original too for scp fallback? move to save space)
+    if cp -a "$DUMP_FILE" "$dl_file" 2>/dev/null || cp "$DUMP_FILE" "$dl_file" 2>/dev/null; then
+        chmod 600 "$dl_file" 2>/dev/null || true
+    else
+        echo -e "${RED}Failed to prepare download link file.${NC}"
+        dl_file="$DUMP_FILE"
+    fi
+    expires=$(( $(date +%s) + 600 ))
+    expires_human=$(date -d "@${expires}" "+%Y-%m-%d %H:%M:%S %Z" 2>/dev/null || date -r "$expires" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "in 10 minutes")
+    {
+        echo "filename=$(basename "$DUMP_FILE")"
+        echo "expires=${expires}"
+        echo "db=${db_name}"
+        echo "size=${fsize:-unknown}"
+        echo "created=$(date +%s)"
+    } > "$dl_meta" 2>/dev/null || true
+    chmod 600 "$dl_meta" 2>/dev/null || true
+    # Schedule deletion after 10 min (expiry)
+    ( sleep 600; rm -f "$dl_file" "$dl_meta" "$DUMP_FILE" 2>/dev/null ) >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    if command -v at >/dev/null 2>&1; then
+        echo "rm -f '$dl_file' '$dl_meta' '$DUMP_FILE' 2>/dev/null" | at now + 10 minutes 2>/dev/null || true
+    fi
+    # Ensure download server is running
+    pushit_dl_ensure_server 2>/dev/null || pushit_dl_init_python_server 2>/dev/null || true
+    dl_url=$(pushit_dl_build_url "$token" 2>/dev/null)
+    echo ""
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN} Download link (valid 10 min, reusable):${NC}"
+    echo -e "  ${YELLOW}${dl_url}${NC}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${YELLOW}Browser:${NC} open link above"
+    echo -e "  ${YELLOW}curl -O \"${dl_url}\"${NC}"
+    echo -e "  ${YELLOW}wget \"${dl_url}\"${NC}"
+    echo -e "  Expires: ${expires_human}  |  Size: ${fsize}  |  File: $(basename "$DUMP_FILE")"
+    echo -e "  ${RED}Link expires in 10 min — reusable until expiry.${NC}"
+    echo ""
+    SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    _SSH_PORT=$(pushit_ssh_port)
+    echo -e "${GREEN}━━━━━━━━ Fallback: scp (if link fails) ━━━━━━━━${NC}"
+    echo -e "  ${YELLOW}File on server:${NC} ${DUMP_FILE}"
+    if [ "$_SSH_PORT" != "22" ]; then
+        echo -e "  ${YELLOW}From your PC:${NC}"
+        echo -e "    ${GREEN}scp -P ${_SSH_PORT} root@${SERVER_IP}:${DUMP_FILE} ./  ${YELLOW}← correct${NC}"
+        echo -e "  ${RED}Wrong:${NC} scp root@${SERVER_IP}:${_SSH_PORT}/...  ${YELLOW}(port goes with -P, not after :)${NC}"
+        echo -e "  ${YELLOW}SSH port is ${_SSH_PORT} (from sshd_config) — always use -P ${_SSH_PORT} for ssh/scp.${NC}"
+        echo -e "    ssh -p ${_SSH_PORT} root@${SERVER_IP}  ${YELLOW}(test connection)${NC}"
+    else
+        echo -e "  ${YELLOW}From your PC:${NC} scp root@${SERVER_IP}:${DUMP_FILE} ./"
+    fi
+    echo -e "  ${YELLOW}Note: file will be deleted after 10 min.${NC}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
 upload_database() {
@@ -1853,17 +1869,17 @@ upload_database() {
     echo -e "${GREEN}'${db_name}' now contains ${TABLE_COUNT} table(s).${NC}"
 }
 
-manage_database_menu() {
+manage_mysql_database_menu() {
     while true; do
-        echo -e "\n--- Database Management ---"
+        echo -e "\n--- MySQL Database Management ---"
         echo "1) Create Database & User"
         echo "2) List Databases"
         echo "3) Delete Database"
         echo "4) Change Database User Password"
         echo "5) Download Database (Backup)"
         echo "6) Upload / Restore Database"
-        echo "0) Back to Main Menu"
-        read -r -p "Select an option: " db_choice
+        echo "0) Back to Database Engines"
+        read -r -p "Select an option: " db_choice || return 0
 
         case $db_choice in
             1)
@@ -1946,6 +1962,345 @@ manage_database_menu() {
             *)
                 echo -e "\e[31mInvalid option.\e[0m"
                 ;;
+        esac
+    done
+}
+
+# PostgreSQL uses the Ubuntu postgres OS account for local peer authentication.
+# Explicit connection settings avoid accidentally using a remote PGHOST/service.
+pushit_pg_run() {
+    local pg_command="$1"
+    shift
+    local -a runner
+    if command -v runuser >/dev/null 2>&1; then
+        runner=(runuser -u postgres --)
+    elif command -v sudo >/dev/null 2>&1; then
+        runner=(sudo -u postgres --)
+    else
+        echo -e "${RED}runuser or sudo is required to run PostgreSQL tools as postgres.${NC}" >&2
+        return 1
+    fi
+    "${runner[@]}" env -u PGHOST -u PGHOSTADDR -u PGPORT -u PGDATABASE -u PGUSER \
+        -u PGPASSWORD -u PGPASSFILE -u PGSERVICE -u PGSERVICEFILE -u PGOPTIONS \
+        "$pg_command" --host=/var/run/postgresql --port="${PUSHIT_PG_PORT:-5432}" \
+        --username=postgres --no-password "$@"
+}
+
+pushit_pg_psql() {
+    pushit_pg_run psql -X --set=ON_ERROR_STOP=1 "$@"
+}
+
+pushit_pg_require() {
+    if ! command -v psql >/dev/null 2>&1; then
+        echo -e "${RED}PostgreSQL client 'psql' not found.${NC}"
+        echo -e "${YELLOW}Install it from Manage DB -> PostgreSQL -> 7) Install PostgreSQL.${NC}"
+        return 1
+    fi
+    # The umbrella service can be active (exited) while the cluster is down.
+    if ! pushit_pg_psql --dbname=postgres -Atc 'SELECT 1' >/dev/null 2>&1; then
+        echo -e "${YELLOW}PostgreSQL is not reachable - trying to start the service...${NC}"
+        systemctl enable --now postgresql 2>/dev/null || service postgresql start 2>/dev/null || true
+        sleep 2
+    fi
+    if ! pushit_pg_psql --dbname=postgres -Atc 'SELECT 1' >/dev/null 2>&1; then
+        echo -e "${RED}Cannot connect to local PostgreSQL as postgres.${NC}"
+        echo -e "${YELLOW}Check: pg_lsclusters ; systemctl status postgresql --no-pager${NC}"
+        echo -e "${YELLOW}Try: sudo -u postgres psql -h /var/run/postgresql -p ${PUSHIT_PG_PORT:-5432} -d postgres -c 'SELECT 1'${NC}"
+        return 1
+    fi
+}
+
+install_postgresql() {
+    local -a packages=(postgresql postgresql-client)
+    if command -v php >/dev/null 2>&1; then
+        packages+=("php${PHP_VERSION}-pgsql")
+    fi
+    echo -e "${YELLOW}Installing PostgreSQL and its client tools...${NC}"
+    if ! apt-get update || ! apt-get install -y "${packages[@]}"; then
+        echo -e "${RED}PostgreSQL package installation failed. Check APT mirrors and retry.${NC}"
+        return 1
+    fi
+    systemctl enable --now postgresql 2>/dev/null || service postgresql start 2>/dev/null || true
+    if ! pushit_pg_require; then return 1; fi
+    if command -v php >/dev/null 2>&1; then
+        if systemctl is-active --quiet "php${PHP_VERSION}-fpm" 2>/dev/null; then
+            systemctl restart "php${PHP_VERSION}-fpm" || return 1
+        fi
+    fi
+    echo -e "${GREEN}PostgreSQL is ready: $(psql --version)${NC}"
+}
+
+pushit_pg_valid_name() {
+    [[ "$1" =~ ^[A-Za-z0-9_]+$ && ${#1} -le 63 ]]
+}
+
+pushit_pg_app_database() {
+    pushit_pg_valid_name "$1" || return 1
+    case "$1" in postgres|template0|template1) return 1 ;; esac
+}
+
+pushit_pg_app_role() {
+    pushit_pg_valid_name "$1" || return 1
+    case "$1" in postgres|pg_*) return 1 ;; esac
+}
+
+pushit_pg_database_exists() {
+    pushit_pg_app_database "$1" || return 1
+    pushit_pg_psql --dbname=postgres -Atc "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$1');"
+}
+
+pushit_pg_role_exists() {
+    pushit_pg_valid_name "$1" || return 1
+    pushit_pg_psql --dbname=postgres -Atc "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$1');"
+}
+
+list_postgresql_databases() {
+    pushit_pg_psql --dbname=postgres -c "SELECT datname AS database, pg_get_userbyid(datdba) AS owner FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres' ORDER BY datname;"
+}
+
+# Passwords go through stdin, never through process arguments or printed output.
+pushit_pg_save_password() {
+    local db_user="$1" db_pass="$2" exists escaped_pass
+    pushit_pg_app_role "$db_user" && [ -n "$db_pass" ] || return 1
+    if ! exists=$(pushit_pg_role_exists "$db_user"); then return 1; fi
+    escaped_pass=$(printf '%s' "$db_pass" | sed "s/'/''/g")
+    if [ "$exists" = t ]; then
+        pushit_pg_psql --dbname=postgres <<SQL
+SET standard_conforming_strings = on;
+ALTER ROLE "$db_user" WITH LOGIN PASSWORD '$escaped_pass';
+SQL
+    else
+        pushit_pg_psql --dbname=postgres <<SQL
+SET standard_conforming_strings = on;
+CREATE ROLE "$db_user" WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '$escaped_pass';
+SQL
+    fi
+}
+
+create_postgresql_database() {
+    pushit_pg_require || return 1
+    local db_name db_user db_pass exists
+    read -r -p "Enter Database Name: " db_name
+    read -r -p "Enter Database User: " db_user
+    read -r -sp "Enter Database Password: " db_pass
+    echo ""
+    if ! pushit_pg_app_database "$db_name" || ! pushit_pg_app_role "$db_user" || [ -z "$db_pass" ]; then
+        echo -e "${RED}Use letters, digits and underscores (max 63 characters), a nonempty password, and no reserved database/user names.${NC}"
+        return 1
+    fi
+    if ! exists=$(pushit_pg_database_exists "$db_name"); then return 1; fi
+    if ! pushit_pg_save_password "$db_user" "$db_pass"; then
+        echo -e "${RED}Failed to create or update PostgreSQL user.${NC}"
+        return 1
+    fi
+    unset db_pass
+    if [ "$exists" = f ]; then
+        if ! pushit_pg_psql --dbname=postgres <<SQL
+CREATE DATABASE "$db_name" OWNER "$db_user" ENCODING 'UTF8' TEMPLATE template0;
+SQL
+        then return 1; fi
+    else
+        if ! pushit_pg_psql --dbname=postgres <<SQL
+ALTER DATABASE "$db_name" OWNER TO "$db_user";
+SQL
+        then return 1; fi
+    fi
+    # Database ownership alone does not grant access to existing tables/sequences.
+    if ! pushit_pg_psql --dbname="$db_name" <<SQL
+GRANT ALL PRIVILEGES ON DATABASE "$db_name" TO "$db_user";
+GRANT USAGE, CREATE ON SCHEMA public TO "$db_user";
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "$db_user";
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO "$db_user";
+GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO "$db_user";
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO "$db_user";
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO "$db_user";
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL PRIVILEGES ON FUNCTIONS TO "$db_user";
+SQL
+    then return 1; fi
+    echo -e "${GREEN}Success: Database '${db_name}' and user '${db_user}' are ready.${NC}"
+    printf 'Laravel .env: DB_CONNECTION=pgsql, DB_HOST=127.0.0.1, DB_PORT=%s, DB_DATABASE=%s, DB_USERNAME=%s\n' "${PUSHIT_PG_PORT:-5432}" "$db_name" "$db_user"
+    echo 'Set DB_PASSWORD in your .env; quote/escape special characters as needed.'
+}
+
+delete_postgresql_database() {
+    pushit_pg_require || return 1
+    list_postgresql_databases || return 1
+    local db_name confirmation
+    read -r -p "Enter Database Name to DELETE (or press Enter to cancel): " db_name
+    [ -n "$db_name" ] || return 0
+    if ! pushit_pg_app_database "$db_name"; then
+        echo -e "${RED}Invalid or reserved database name.${NC}"
+        return 1
+    fi
+    read -r -p "Type the database name again to confirm: " confirmation
+    if [ "$confirmation" != "$db_name" ]; then
+        echo -e "${RED}Confirmation does not match. Aborted.${NC}"
+        return 1
+    fi
+    if pushit_pg_psql --dbname=postgres <<SQL
+DROP DATABASE IF EXISTS "$db_name";
+SQL
+    then
+        echo -e "${GREEN}Success: Database '${db_name}' deleted.${NC}"
+    else
+        echo -e "${RED}Delete failed. Check for active connections to '${db_name}'.${NC}"
+        return 1
+    fi
+}
+
+change_postgresql_password() {
+    pushit_pg_require || return 1
+    local db_user db_pass
+    read -r -p "Enter Database User to edit: " db_user
+    read -r -sp "Enter New Password: " db_pass
+    echo ""
+    if pushit_pg_save_password "$db_user" "$db_pass"; then
+        echo -e "${GREEN}Success: Password updated for user '${db_user}'.${NC}"
+    else
+        echo -e "${RED}Password update failed. Check the user name and use a nonempty password.${NC}"
+        return 1
+    fi
+}
+
+download_postgresql_database() {
+    pushit_pg_require || return 1
+    if ! command -v pg_dump >/dev/null 2>&1; then
+        echo -e "${RED}pg_dump not found. Install postgresql-client first.${NC}"
+        return 1
+    fi
+    list_postgresql_databases || return 1
+    local db_name exists backup_dir dump_file
+    read -r -p "Enter Database Name to download: " db_name
+    if ! pushit_pg_app_database "$db_name"; then
+        echo -e "${RED}Invalid or reserved database name.${NC}"
+        return 1
+    fi
+    if ! exists=$(pushit_pg_database_exists "$db_name"); then return 1; fi
+    if [ "$exists" != t ]; then
+        echo -e "${RED}Database '${db_name}' not found.${NC}"
+        return 1
+    fi
+    backup_dir="${PUSHIT_DB_BACKUP_DIR:-/root/db-backups}/postgresql"
+    mkdir -p "$backup_dir" || return 1
+    dump_file=$(mktemp "${backup_dir}/${db_name}_$(date +%Y%m%d_%H%M%S)_XXXXXX") || return 1
+    if ! mv "$dump_file" "${dump_file}.sql.gz"; then rm -f "$dump_file"; return 1; fi
+    dump_file="${dump_file}.sql.gz"
+    echo -e "${YELLOW}Dumping PostgreSQL database '${db_name}'...${NC}"
+    # Portable SQL: the destination owner supplies object ownership and grants.
+    if (set -o pipefail; pushit_pg_run pg_dump --dbname="$db_name" --format=plain --no-owner --no-acl | gzip > "$dump_file"); then
+        pushit_db_publish_backup "$dump_file" "$db_name"
+    else
+        rm -f "$dump_file"
+        echo -e "${RED}Dump failed. No backup file was kept.${NC}"
+        return 1
+    fi
+}
+
+upload_postgresql_database() {
+    pushit_pg_require || return 1
+    local sql_file db_name exists db_owner role_exists table_count server_ip ssh_port
+    server_ip=$(hostname -I 2>/dev/null | awk '{print $1}') || server_ip=""
+    ssh_port=$(pushit_ssh_port)
+    printf 'Upload your PostgreSQL dump: scp -P %s ./backup.sql.gz root@%s:/root/\n' "$ssh_port" "${server_ip:-SERVER_IP}"
+    read -r -p "Enter path of the PostgreSQL .sql or .sql.gz file on this server: " sql_file
+    if [ ! -f "$sql_file" ]; then
+        echo -e "${RED}File not found: '${sql_file}'${NC}"
+        return 1
+    fi
+    case "$sql_file" in
+        *.sql.gz) gzip -t "$sql_file" || return 1 ;;
+        *.sql) ;;
+        *) echo -e "${RED}Use a PostgreSQL plain SQL dump (.sql or .sql.gz).${NC}"; return 1 ;;
+    esac
+    read -r -p "Enter target Database Name: " db_name
+    if ! pushit_pg_app_database "$db_name"; then
+        echo -e "${RED}Invalid or reserved database name.${NC}"
+        return 1
+    fi
+    if ! exists=$(pushit_pg_database_exists "$db_name"); then return 1; fi
+    if [ "$exists" = f ]; then
+        local create_answer
+        read -r -p "Database '${db_name}' does not exist. Create it now? (y/n): " create_answer
+        [[ "$create_answer" =~ ^[yY] ]] || return 1
+        read -r -p "Enter existing Database User to own the new database: " db_owner
+        if ! pushit_pg_app_role "$db_owner"; then
+            echo -e "${RED}Invalid or reserved database user. Create it with option 1 first.${NC}"
+            return 1
+        fi
+        if ! role_exists=$(pushit_pg_role_exists "$db_owner"); then return 1; fi
+        if [ "$role_exists" != t ]; then
+            echo -e "${RED}User not found. Create it with option 1 first.${NC}"
+            return 1
+        fi
+        if ! pushit_pg_psql --dbname=postgres <<SQL
+CREATE DATABASE "$db_name" OWNER "$db_owner" ENCODING 'UTF8' TEMPLATE template0;
+SQL
+        then return 1; fi
+    else
+        if ! db_owner=$(pushit_pg_psql --dbname=postgres -Atc "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = '$db_name';"); then return 1; fi
+    fi
+    # Restore as the target database owner so app users can run future migrations.
+    # Quote even externally created role names; never interpolate unquoted SQL.
+    local quoted_owner
+    quoted_owner=$(printf '%s' "$db_owner" | sed 's/"/""/g')
+    echo -e "${YELLOW}Restoring '${sql_file}' into '${db_name}'...${NC}"
+    if (set -o pipefail
+        {
+            printf 'SET ROLE "%s";\n' "$quoted_owner"
+            case "$sql_file" in
+                *.sql.gz) gunzip -c "$sql_file" ;;
+                *) cat "$sql_file" ;;
+            esac
+        } | pushit_pg_psql --dbname="$db_name" --single-transaction
+    ); then
+        if ! table_count=$(pushit_pg_psql --dbname="$db_name" -Atc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema') AND table_type = 'BASE TABLE';"); then return 1; fi
+        echo -e "${GREEN}Success: '${db_name}' restored; ${table_count} table(s).${NC}"
+    else
+        echo -e "${RED}Restore failed. Check the dump and target database.${NC}"
+        return 1
+    fi
+}
+
+manage_postgresql_database_menu() {
+    local db_choice
+    while true; do
+        echo -e "\n--- PostgreSQL Database Management ---"
+        echo '1) Create Database & User'
+        echo '2) List Databases'
+        echo '3) Delete Database'
+        echo '4) Change Database User Password'
+        echo '5) Download Database (Backup)'
+        echo '6) Upload / Restore Database'
+        echo '7) Install PostgreSQL (including PHP driver if PHP is installed)'
+        echo '0) Back to Database Engines'
+        read -r -p 'Select an option: ' db_choice || return 0
+        case "$db_choice" in
+            1) create_postgresql_database ;;
+            2) pushit_pg_require && list_postgresql_databases ;;
+            3) delete_postgresql_database ;;
+            4) change_postgresql_password ;;
+            5) download_postgresql_database ;;
+            6) upload_postgresql_database ;;
+            7) install_postgresql ;;
+            0) return 0 ;;
+            *) echo -e "${RED}Invalid option.${NC}" ;;
+        esac
+    done
+}
+
+manage_database_menu() {
+    local engine_choice
+    while true; do
+        echo -e "\n--- Database Engines ---"
+        echo '1) MySQL'
+        echo '2) PostgreSQL'
+        echo '0) Back to Main Menu'
+        read -r -p 'Select a database engine: ' engine_choice || return 0
+        case "$engine_choice" in
+            1) manage_mysql_database_menu ;;
+            2) manage_postgresql_database_menu ;;
+            0) return 0 ;;
+            *) echo -e "${RED}Invalid choice.${NC}" ;;
         esac
     done
 }
@@ -2959,12 +3314,12 @@ show_menu() {
     fi
     echo "0) Exit"
     echo "1) Manage Mirrors (APT)"
-    echo "2) Install Full Stack (Nginx, PHP ${PHP_VERSION}, MySQL, Redis, Node)"
+    echo "2) Install Full Stack (Nginx, PHP ${PHP_VERSION}, MySQL, PostgreSQL, Redis, Node)"
     echo "3) Manage Sites (Deploy / Delete)"
     echo "4) Install SSL (Certbot)"
     echo "5) Manage Firewall (UFW)"
     echo "6) Harden Server (SSH)"
-    echo "7) Manage DB"
+    echo "7) Manage DB (MySQL / PostgreSQL)"
     echo "8) Manage Cron"
     echo "9) Manage Supervisor"
     echo "10) Manage DNS (/etc/resolv.conf)"
@@ -3000,8 +3355,10 @@ show_menu() {
 }
 
 
-check_root
-pushit_ensure_bootstrap
-while true; do
-    show_menu
-done
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    check_root
+    pushit_ensure_bootstrap
+    while true; do
+        show_menu
+    done
+fi
