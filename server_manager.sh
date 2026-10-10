@@ -22,7 +22,7 @@ NPM_VERSION="12.0.2"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.18"
+PUSHIT_VERSION="0.1.19"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -1462,6 +1462,331 @@ remove_site_domain() {
 }
 
 
+# Local human accounts created by site deployment (including pre-existing users).
+pushit_server_user_records() {
+    local uid_min
+    uid_min=$(awk '$1 == "UID_MIN" {print $2; exit}' "${PUSHIT_USERS_LOGIN_DEFS:-/etc/login.defs}" 2>/dev/null) || uid_min=""
+    [[ "$uid_min" =~ ^[0-9]+$ ]] || uid_min=1000
+    awk -F: -v minimum="$uid_min" '$1 != "root" && $3 > 0 && $3 >= minimum && $3 < 65534 && $6 == "/home/" $1 {print}' "${PUSHIT_USERS_PASSWD_FILE:-/etc/passwd}"
+}
+
+pushit_server_user_require() {
+    local username="$1" record
+    if ! [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+        echo -e "${RED}Invalid system username.${NC}" >&2
+        return 1
+    fi
+    record=$(pushit_server_user_records | awk -F: -v name="$username" '$1 == name {print; exit}') || return 1
+    if [ -z "$record" ]; then
+        echo -e "${RED}User '${username}' is not a local non-system account with home /home/${username}.${NC}" >&2
+        return 1
+    fi
+}
+
+# Normalize Nginx directives so one-line server/location blocks are recognized.
+pushit_user_config_lines() {
+    awk '{sub(/#.*/, ""); gsub(/[{};]/, "\n"); print}' "$1"
+}
+
+pushit_user_site_files() {
+    local username="$1" file other base
+    local available="${PUSHIT_USERS_NGINX_AVAILABLE:-/etc/nginx/sites-available}"
+    local enabled="${PUSHIT_USERS_NGINX_ENABLED:-/etc/nginx/sites-enabled}"
+    for file in "$available"/* "$enabled"/*; do
+        [ -f "$file" ] || continue
+        base=$(basename "$file")
+        case "$base" in *.bak.*|*.dpkg-*|*~) continue ;; esac
+        other="$available/$base"
+        if [[ "$file" == "$enabled/"* ]] && [ -f "$other" ] && [ "$file" -ef "$other" ]; then continue; fi
+        # Match complete root prefixes and dedicated FPM sockets; ignore comments.
+        if pushit_user_config_lines "$file" | awk -v home="/home/$username" -v socket="-fpm-$username.sock" '
+            {sub(/#.*/, ""); gsub(/["\047]/, "")}
+            $1 == "root" {path=$2; sub(/;$/, "", path); if (path == home || index(path, home "/") == 1) found=1}
+            $1 == "fastcgi_pass" && index($2, socket) > 0 {found=1}
+            END {exit !found}
+        '; then printf '%s\n' "$file"; fi
+    done
+}
+
+pushit_show_user_sites() {
+    local username="$1" file names found=0 state
+    local enabled="${PUSHIT_USERS_NGINX_ENABLED:-/etc/nginx/sites-enabled}"
+    while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        found=1
+        names=$(pushit_user_config_lines "$file" | awk '{sub(/#.*/, "")} $1 == "server_name" {sub(/^[[:space:]]*server_name[[:space:]]+/, ""); gsub(/;/, ""); print}' | xargs)
+        state=disabled
+        if [[ "$file" == "$enabled/"* ]] || [ "$file" -ef "$enabled/$(basename "$file")" ]; then state=enabled; fi
+        printf '    - %s | domains: %s | %s\n' "$(basename "$file")" "${names:-(no server_name)}" "$state"
+    done < <(pushit_user_site_files "$username")
+    if [ "$found" -eq 0 ]; then echo '    - No Nginx sites assigned.'; fi
+}
+
+list_server_users() {
+    local username _password uid _gid _comment home login_shell found=0
+    echo -e "\n--- Server Users & Sites ---"
+    while IFS=: read -r username _password uid _gid _comment home login_shell; do
+        [ -n "$username" ] || continue
+        found=1
+        printf '\nUser: %s | UID: %s | Home: %s | Shell: %s\n' "$username" "$uid" "$home" "$login_shell"
+        pushit_show_user_sites "$username"
+    done < <(pushit_server_user_records)
+    if [ "$found" -eq 0 ]; then echo 'No local server users found.'; fi
+}
+
+change_server_user_password() {
+    local username password confirmation
+    read -r -p 'Enter server username (Enter to cancel): ' username || return 1
+    [ -n "$username" ] || return 0
+    pushit_server_user_require "$username" || return 1
+    read -r -sp 'Enter new password: ' password || return 1
+    echo ''
+    read -r -sp 'Repeat new password: ' confirmation || return 1
+    echo ''
+    if [ -z "$password" ] || [ "$password" != "$confirmation" ]; then
+        echo -e "${RED}Passwords must be nonempty and match. Nothing was changed.${NC}"
+        return 1
+    fi
+    if (set -o pipefail; printf '%s:%s\n' "$username" "$password" | chpasswd); then
+        unset password confirmation
+        echo -e "${GREEN}Password updated for server user '${username}'.${NC}"
+        echo 'SSH password login still follows the existing SSH authentication policy.'
+    else
+        unset password confirmation
+        echo -e "${RED}Password update failed.${NC}"
+        return 1
+    fi
+}
+
+pushit_server_user_delete_require() {
+    local username="$1" groups uid duplicates
+    pushit_server_user_require "$username" || return 1
+    if [ "$username" = "${SUDO_USER:-}" ] || [ "$username" = "${USER:-}" ] || who 2>/dev/null | awk -v name="$username" '$1 == name {found=1} END {exit !found}'; then
+        echo -e "${RED}Cannot delete the current session user or a logged-in user.${NC}" >&2
+        return 1
+    fi
+    if ! groups=$(id -nG "$username" 2>/dev/null); then
+        echo -e "${RED}Cannot verify the user's groups.${NC}" >&2
+        return 1
+    fi
+    if printf '%s\n' "$groups" | tr ' ' '\n' | grep -Eq '^(sudo|admin|wheel)$'; then
+        echo -e "${RED}Administrator accounts cannot be deleted from this menu.${NC}" >&2
+        return 1
+    fi
+    uid=$(awk -F: -v name="$username" '$1 == name {print $3; exit}' "${PUSHIT_USERS_PASSWD_FILE:-/etc/passwd}")
+    duplicates=$(awk -F: -v uid="$uid" '$3 == uid {count++} END {print count+0}' "${PUSHIT_USERS_PASSWD_FILE:-/etc/passwd}")
+    if [ "$duplicates" -ne 1 ]; then
+        echo -e "${RED}Cannot delete an account with a shared UID.${NC}" >&2
+        return 1
+    fi
+}
+
+pushit_user_service_configs() {
+    local username="$1" file
+    local php_dir="${PUSHIT_USERS_PHP_DIR:-/etc/php}"
+    local supervisor_dir="${PUSHIT_USERS_SUPERVISOR_DIR:-/etc/supervisor/conf.d}"
+    for file in "$php_dir"/*/fpm/pool.d/*.conf "$supervisor_dir"/*.conf; do
+        [ -f "$file" ] || continue
+        if awk -F= -v name="$username" '
+            {sub(/[;#].*/, ""); key=$1; value=$2; gsub(/[[:space:]]/, "", key); gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)}
+            key == "user" && value == name {found=1}
+            END {exit !found}
+        ' "$file"; then printf '%s\n' "$file"; fi
+    done
+}
+
+pushit_user_config_is_shared() {
+    local username="$1" file="$2"
+    pushit_user_config_lines "$file" | awk -v home="/home/$username" -v name="$username" '
+        {sub(/[;#].*/, ""); gsub(/["\047]/, "")}
+        $1 == "root" && index($2, "/home/") == 1 && $2 != home && index($2, home "/") != 1 {shared=1}
+        $1 == "fastcgi_pass" && index($2, "-fpm-") > 0 && index($2, "-fpm-" name ".sock") == 0 {shared=1}
+        /^[[:space:]]*user[[:space:]]*=/ {value=$0; sub(/^[^=]*=[[:space:]]*/, "", value); sub(/[[:space:]]*$/, "", value); if (value != name) shared=1}
+        END {exit !shared}
+    '
+}
+
+pushit_user_restore_configs() {
+    local stage="$1" file index=0 status=0
+    shift
+    for file in "$@"; do
+        rm -f "$file" || status=1
+        cp -a "$stage/$index" "$file" || status=1
+        index=$((index + 1))
+    done
+    return "$status"
+}
+
+pushit_user_reload_services() {
+    local nginx_changed="$1" supervisor_changed="$2" ssh_changed="$3" version
+    shift 3
+    if [ "$nginx_changed" -eq 1 ]; then
+        nginx -t && systemctl reload nginx || return 1
+    fi
+    for version in "$@"; do
+        systemctl restart "php${version}-fpm" || return 1
+    done
+    if [ "$supervisor_changed" -eq 1 ]; then
+        supervisorctl reread && supervisorctl update || return 1
+    fi
+    if [ "$ssh_changed" -eq 1 ]; then
+        systemctl reload ssh || systemctl reload sshd || return 1
+    fi
+}
+
+delete_server_user() {
+    local username confirmation file stage index=0 status=0 version enabled
+    local nginx_changed=0 supervisor_changed=0 ssh_changed=0 ai_was_active=0 site_snapshot service_snapshot
+    local ssh_config="${PUSHIT_USERS_SSH_CONFIG:-/etc/ssh/sshd_config}"
+    local php_dir="${PUSHIT_USERS_PHP_DIR:-/etc/php}"
+    local supervisor_dir="${PUSHIT_USERS_SUPERVISOR_DIR:-/etc/supervisor/conf.d}"
+    local -a configs=() versions=()
+    read -r -p 'Enter server username to DELETE (Enter to cancel): ' username || return 1
+    [ -n "$username" ] || return 0
+    pushit_server_user_delete_require "$username" || return 1
+    if [ -L "/home/$username" ]; then
+        echo -e "${RED}Refusing to delete a user with a symlinked home directory.${NC}"
+        return 1
+    fi
+    pushit_show_user_sites "$username"
+    site_snapshot=$(pushit_user_site_files "$username") || return 1
+    service_snapshot=$(pushit_user_service_configs "$username") || return 1
+    while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        configs+=("$file")
+        nginx_changed=1
+        # Also remove the corresponding enabled link when the file is available.
+        enabled="${PUSHIT_USERS_NGINX_ENABLED:-/etc/nginx/sites-enabled}/$(basename "$file")"
+        if [ -L "$enabled" ] && [ "$file" -ef "$enabled" ] && [ "$file" != "$enabled" ]; then configs+=("$enabled"); fi
+    done <<< "$site_snapshot"
+    while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        configs+=("$file")
+        if [[ "$file" == "$php_dir/"* ]]; then
+            version=${file#"$php_dir/"}
+            version=${version%%/*}
+            [[ "$version" =~ ^[0-9]+\.[0-9]+$ ]] || return 1
+            if ! printf '%s\n' ${versions[@]+"${versions[@]}"} | grep -Fxq "$version"; then versions+=("$version"); fi
+        elif [[ "$file" == "$supervisor_dir/"* ]]; then
+            supervisor_changed=1
+        fi
+    done <<< "$service_snapshot"
+    for file in ${configs[@]+"${configs[@]}"}; do
+        if pushit_user_config_is_shared "$username" "$file"; then
+            echo -e "${RED}Configuration '${file}' also uses another account. Separate it before deleting this user.${NC}"
+            return 1
+        fi
+    done
+    if [ "$nginx_changed" -eq 1 ]; then
+        command -v nginx >/dev/null 2>&1 && nginx -t || return 1
+    fi
+    if [ "$supervisor_changed" -eq 1 ]; then
+        command -v supervisorctl >/dev/null 2>&1 || return 1
+    fi
+    if [ -f "$ssh_config" ] && awk -v name="$username" '$1 == "Match" && $2 == "User" && $3 == name && NF == 3 {found=1} END {exit !found}' "$ssh_config"; then
+        ssh_changed=1
+        command -v sshd >/dev/null 2>&1 && sshd -t -f "$ssh_config" || return 1
+    fi
+    echo -e "${YELLOW}DELETE ALL sites above, user '${username}', every file in /home/${username}, its crontab and user processes.${NC}"
+    for file in ${configs[@]+"${configs[@]}"}; do printf '  - Remove configuration: %s\n' "$file"; done
+    if [ "$ssh_changed" -eq 1 ]; then printf '  - Remove dedicated SSH Match User %s block\n' "$username"; fi
+    echo 'SSL certificates and database accounts are managed separately.'
+    read -r -p 'Type the username again to confirm deleting the user AND ALL ITS SITES: ' confirmation || return 1
+    if [ "$confirmation" != "$username" ]; then
+        echo -e "${RED}Confirmation does not match. Nothing was deleted.${NC}"
+        return 1
+    fi
+    pushit_server_user_delete_require "$username" || return 1
+    if [ "$site_snapshot" != "$(pushit_user_site_files "$username")" ] || [ "$service_snapshot" != "$(pushit_user_service_configs "$username")" ]; then
+        echo -e "${RED}The user's sites/services changed during confirmation. Review the new list and retry.${NC}"
+        return 1
+    fi
+    for file in ${configs[@]+"${configs[@]}"}; do
+        if pushit_user_config_is_shared "$username" "$file"; then
+            echo -e "${RED}Configuration '${file}' is now shared. Deletion aborted.${NC}"
+            return 1
+        fi
+    done
+    # Keep originals for rollback if validation/reload/account deletion fails.
+    stage=$(mktemp -d "${TMPDIR:-/tmp}/pushit-user-delete.XXXXXX") || return 1
+    for file in ${configs[@]+"${configs[@]}"}; do
+        if ! cp -a "$file" "$stage/$index"; then rm -rf "$stage"; return 1; fi
+        index=$((index + 1))
+    done
+    if [ "$ssh_changed" -eq 1 ]; then
+        cp -a "$ssh_config" "$stage/sshd_config" || { rm -rf "$stage"; return 1; }
+        awk -v name="$username" '
+            $1 == "Match" {skip=($2 == "User" && $3 == name && NF == 3)}
+            !skip {print}
+        ' "$ssh_config" > "$stage/sshd_config.new" || { rm -rf "$stage"; return 1; }
+    fi
+    crontab -l -u "$username" > "$stage/crontab" 2>/dev/null || true
+    anchor_cwd
+    for file in ${configs[@]+"${configs[@]}"}; do rm -f "$file" || status=1; done
+    if [ "$ssh_changed" -eq 1 ]; then
+        cat "$stage/sshd_config.new" > "$ssh_config" && sshd -t -f "$ssh_config" || status=1
+    fi
+    if [ "$status" -eq 0 ]; then
+        pushit_user_reload_services "$nginx_changed" "$supervisor_changed" "$ssh_changed" ${versions[@]+"${versions[@]}"} || status=1
+    fi
+    if [ "$status" -eq 0 ]; then
+        # Stop the per-user agent and remaining processes before removing the account.
+        if systemctl is-active --quiet "pushit-ai@$username" 2>/dev/null; then
+            ai_was_active=1
+            systemctl stop "pushit-ai@$username" || status=1
+        fi
+        if pgrep -u "$username" >/dev/null 2>&1; then
+            pkill -TERM -u "$username" 2>/dev/null || status=1
+            sleep 1
+        fi
+        if pgrep -u "$username" >/dev/null 2>&1; then
+            echo -e "${RED}User processes are still running. Stop them before retrying.${NC}"
+            status=1
+        fi
+    fi
+    if [ "$status" -eq 0 ]; then
+        # Remove cron while the account still exists; userdel does not do this reliably.
+        crontab -r -u "$username" 2>/dev/null || true
+        userdel -r "$username" || status=1
+    fi
+    if [ "$status" -ne 0 ]; then
+        # userdel can report a partially completed deletion. Keep services disabled
+        # when the account no longer exists, instead of referencing a missing user.
+        if pushit_server_user_require "$username" >/dev/null 2>&1; then
+            if [ "$ssh_changed" -eq 1 ]; then cp -a "$stage/sshd_config" "$ssh_config" || true; fi
+            if pushit_user_restore_configs "$stage" ${configs[@]+"${configs[@]}"}; then
+                pushit_user_reload_services "$nginx_changed" "$supervisor_changed" "$ssh_changed" ${versions[@]+"${versions[@]}"} || true
+            fi
+            if [ -s "$stage/crontab" ]; then crontab -u "$username" "$stage/crontab" || true; fi
+            if [ "$ai_was_active" -eq 1 ]; then systemctl start "pushit-ai@$username" || true; fi
+        fi
+        echo -e "${RED}Deletion failed or was incomplete. Config backups are in '${stage}'; verify the account/home before retrying.${NC}"
+        return 1
+    fi
+    systemctl disable "pushit-ai@$username" 2>/dev/null || true
+    rm -rf "$stage"
+    echo -e "${GREEN}Server user '${username}', its sites and home directory removed.${NC}"
+}
+
+manage_server_users() {
+    local choice
+    while true; do
+        echo -e "\n--- Server User Management ---"
+        echo '1) List Users & Their Sites'
+        echo '2) Change User Password'
+        echo '3) Delete User'
+        echo '0) Back'
+        read -r -p 'Select an option: ' choice || return 0
+        case "$choice" in
+            1) list_server_users ;;
+            2) change_server_user_password ;;
+            3) delete_server_user ;;
+            0) return 0 ;;
+            *) echo -e "${RED}Invalid choice.${NC}" ;;
+        esac
+    done
+}
+
 manage_sites() {
     while true; do
         echo -e "\n--- Site Management ---"
@@ -1471,6 +1796,7 @@ manage_sites() {
         echo "4) Remove Domain from Site"
         echo "5) List Sites & Domains"
         echo "6) Manage Site AI Agents"
+        echo "7) Manage Server Users"
         echo "0) Back"
         read -r -p "Choice: " SITE_CHOICE
         case $SITE_CHOICE in
@@ -1480,6 +1806,7 @@ manage_sites() {
             4) remove_site_domain ;;
             5) list_site_domains ;;
             6) manage_project_ai ;;
+            7) manage_server_users ;;
             0) break ;;
             *) echo -e "\e[31mInvalid choice.\e[0m" ;;
         esac
@@ -3331,6 +3658,7 @@ show_menu() {
     fi
     echo -e "${RED}13) Uninstall Pushit (remove script & cache)${NC}"
     echo "14) Manage Server AI Agent"
+    echo "15) Manage Server Users (List / Password / Delete)"
     read -r -p "Option [u=update]: " OPT
     # Shortcut: 'u' / 'U' triggers update when available, or anyway
     if [[ "$OPT" =~ ^[uU]$ ]]; then OPT="12"; fi
@@ -3350,6 +3678,7 @@ show_menu() {
         12) pushit_update_script ;;
         13) pushit_uninstall ;;
         14) manage_server_ai ;;
+        15) manage_server_users ;;
         *) echo "Invalid option." ;;
     esac
 }
