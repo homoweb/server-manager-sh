@@ -18,7 +18,7 @@ PHP_VERSION="8.4"
 # Single source of truth for the Node.js major version (NodeSource setup script)
 NODE_VERSION="22"
 # Single source of truth for npm version (pinned after Node install)
-NPM_VERSION="12.0.2"
+NPM_VERSION="12.0.3"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
@@ -2372,7 +2372,8 @@ pushit_ssh_prepare_configs() {
 import glob, json, os, pathlib, re, shlex, shutil, sys
 main, backup = pathlib.Path(sys.argv[1]).resolve(), pathlib.Path(sys.argv[2])
 policy = {
-    'permitrootlogin': ('PermitRootLogin', 'no'),
+    # Root stays available for the selected key; password authentication is disabled below.
+    'permitrootlogin': ('PermitRootLogin', 'prohibit-password'),
     'passwordauthentication': ('PasswordAuthentication', 'no'),
     'kbdinteractiveauthentication': ('KbdInteractiveAuthentication', 'no'),
     'challengeresponseauthentication': ('ChallengeResponseAuthentication', 'no'),
@@ -2467,13 +2468,15 @@ pushit_ssh_confirm_hardening() {
 }
 
 pushit_ssh_verify_policy() {
-    local sshd_bin="$1" config="$2" admin="$3" username output setting
+    local sshd_bin="$1" config="$2" target_user="$3" username output setting previous_user=''
     local address="${SSH_CONNECTION:-}"
     address="${address%% *}"
     address="${address:-127.0.0.1}"
-    for username in root "$admin"; do
+    for username in root "$target_user"; do
+        [ "$username" != "$previous_user" ] || continue
+        previous_user="$username"
         output=$("$sshd_bin" -T -f "$config" -C "user=$username,addr=$address,host=$address") || return 1
-        for setting in 'permitrootlogin no' 'passwordauthentication no' 'kbdinteractiveauthentication no' 'pubkeyauthentication yes' 'authenticationmethods publickey'; do
+        for setting in 'permitrootlogin prohibit-password' 'passwordauthentication no' 'kbdinteractiveauthentication no' 'pubkeyauthentication yes' 'authenticationmethods publickey'; do
             if ! printf '%s\n' "$output" | grep -Fxq "$setting"; then
                 echo -e "${RED}Effective SSH policy for '${username}' did not match '${setting}'.${NC}"
                 return 1
@@ -2484,12 +2487,12 @@ pushit_ssh_verify_policy() {
 
 # The private key is exported once and removed before waiting for confirmation.
 pushit_ssh_generate_client_key() (
-    local public_file="$1" client_name="$2" admin="$3" key_dir saved
+    local public_file="$1" client_name="$2" login_user="$3" key_dir saved
     umask 077
     key_dir=$(mktemp -d "${TMPDIR:-/tmp}/pushit-ssh-key.XXXXXX") || return 1
     trap 'rm -rf -- "$key_dir"' EXIT
     trap 'exit 1' HUP INT TERM
-    ssh-keygen -q -t ed25519 -N '' -C "$admin@pushit" -f "$key_dir/private_key" || return 1
+    ssh-keygen -q -t ed25519 -N '' -C "$login_user@pushit" -f "$key_dir/private_key" || return 1
     echo ''
     echo 'New SSH key pair. Keep the PRIVATE key secret; only the PUBLIC key is installed on the server.'
     echo 'On your own Mac/Linux computer, copy and run this entire block to save BOTH files:'
@@ -2522,49 +2525,35 @@ KEYSAVE
     cp "$key_dir/private_key.pub" "$public_file"
 )
 
-pushit_ssh_admin_record() {
-    local username="$1" record uid home
-    if ! [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || [ "$username" = root ]; then return 1; fi
-    record=$(getent passwd "$username") || return 1
+pushit_ssh_root_record() {
+    local record uid home
+    record=$(getent passwd root) || return 1
     uid=$(printf '%s\n' "$record" | cut -d: -f3)
     home=$(printf '%s\n' "$record" | cut -d: -f6)
-    if ! [[ "$uid" =~ ^[0-9]+$ ]] || [ "$uid" -eq 0 ] || [ "$home" != "${PUSHIT_SSH_HOME_ROOT:-/home}/$username" ]; then return 1; fi
+    if ! [[ "$uid" =~ ^[0-9]+$ ]] || [ "$uid" -ne 0 ] || [ -z "$home" ] || [ "${home#/}" = "$home" ] || [ "$home" = / ]; then return 1; fi
     if [ ! -d "$home" ] || [ -L "$home" ] || [ -L "$home/.ssh" ] || [ -L "$home/.ssh/authorized_keys" ]; then return 1; fi
-    if ! id -nG "$username" 2>/dev/null | tr ' ' '\n' | grep -Fxq sudo; then return 1; fi
     printf '%s\n' "$record"
 }
 
 pushit_harden_server_wizard() {
     local config="${PUSHIT_SSH_CONFIG:-/etc/ssh/sshd_config}"
     local backup_root="${PUSHIT_SSH_BACKUP_DIR:-/var/backups/pushit/ssh}"
-    local admin record home group candidate key_choice public_key key_file
+    local ssh_user record home group key_choice public_key key_file
     local sshd_bin backup unit confirmation port server_ip command_name pending generated_key_name='' missing=0
     echo -e "\n--- Guided SSH Hardening ---"
-    echo 'This wizard uses an existing sudo administrator and prepares public-key login before disabling root/password SSH.'
-    admin=''
-    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && record=$(pushit_ssh_admin_record "$SUDO_USER"); then
-        admin="$SUDO_USER"
-    else
-        while IFS=: read -r candidate _; do
-            [ -n "$candidate" ] || continue
-            [ "$candidate" != "${SUDO_USER:-}" ] || continue
-            if record=$(pushit_ssh_admin_record "$candidate"); then
-                admin="$candidate"
-                break
-            fi
-        done < <(getent passwd)
-    fi
-    if [ -z "$admin" ]; then
-        echo -e "${RED}No existing non-root sudo administrator with a usable /home/<user> account was found. Add one and run SSH Hardening again; no changes were made.${NC}"
+    echo 'This wizard configures root SSH access with a public key and disables password-based SSH authentication.'
+    ssh_user=root
+    if ! record=$(pushit_ssh_root_record); then
+        echo -e "${RED}The root account does not have a usable home directory for SSH keys; no changes were made.${NC}"
         return 1
     fi
-    echo -e "${GREEN}Using existing sudo administrator '${admin}'.${NC}"
-    for command_name in python3 ssh-keygen sshd sudo flock systemd-run; do
+    echo -e "${GREEN}Using the root SSH account. Login will require a public key.${NC}"
+    for command_name in python3 ssh-keygen sshd flock systemd-run; do
         command -v "$command_name" >/dev/null 2>&1 || missing=1
     done
     if [ "$missing" -eq 1 ]; then
         echo -e "${YELLOW}Installing required SSH administration tools...${NC}"
-        apt-get update && apt-get install -y openssh-server openssh-client sudo python3 util-linux || return 1
+        apt-get update && apt-get install -y openssh-server openssh-client python3 util-linux || return 1
     fi
     sshd_bin=$(command -v sshd) || return 1
     "$sshd_bin" -t -f "$config" || return 1
@@ -2575,7 +2564,7 @@ pushit_harden_server_wizard() {
         /bin/bash "$backup/rollback.sh" "$backup" "$sshd_bin" "$config" || return 1
     done
     home=$(printf '%s\n' "$record" | cut -d: -f6)
-    group=$(id -gn "$admin") || return 1
+    group=$(id -gn "$ssh_user") || return 1
     mkdir -p "$backup_root" || return 1
     chmod 700 "$backup_root" || return 1
     backup=$(mktemp -d "$backup_root/hardening.XXXXXX") || return 1
@@ -2592,8 +2581,8 @@ pushit_harden_server_wizard() {
                 printf '%s\n' "$public_key" > "$key_file"
                 ;;
             2)
-                generated_key_name="pushit_${admin}_${backup##*.}"
-                pushit_ssh_generate_client_key "$key_file" "$generated_key_name" "$admin" || return 1
+                generated_key_name="pushit_${ssh_user}_${backup##*.}"
+                pushit_ssh_generate_client_key "$key_file" "$generated_key_name" "$ssh_user" || return 1
                 ;;
             0) echo 'Cancelled. SSH policy was not changed.'; return 0 ;;
             *) echo 'Invalid choice.'; continue ;;
@@ -2612,7 +2601,7 @@ pushit_harden_server_wizard() {
     if ! grep -Fqx -f "$key_file" "$home/.ssh/authorized_keys"; then
         { printf '\n'; cat "$key_file"; } >> "$home/.ssh/authorized_keys" || return 1
     fi
-    chown "$admin:$group" "$home/.ssh" "$home/.ssh/authorized_keys" || return 1
+    chown "$ssh_user:$group" "$home/.ssh" "$home/.ssh/authorized_keys" || return 1
     chmod go-w "$home" || return 1
     if ! pushit_ssh_prepare_configs "$config" "$backup" || ! pushit_ssh_write_rollback "$backup"; then return 1; fi
     touch "$backup/pending" || return 1
@@ -2622,7 +2611,7 @@ pushit_harden_server_wizard() {
         echo -e "${RED}Could not arm automatic rollback. SSH policy was not changed.${NC}"
         return 1
     fi
-    if ! pushit_ssh_copy_configs "$backup" candidate || ! "$sshd_bin" -t -f "$config" || ! pushit_ssh_verify_policy "$sshd_bin" "$config" "$admin" || ! pushit_ssh_reload; then
+    if ! pushit_ssh_copy_configs "$backup" candidate || ! "$sshd_bin" -t -f "$config" || ! pushit_ssh_verify_policy "$sshd_bin" "$config" "$ssh_user" || ! pushit_ssh_reload; then
         echo -e "${RED}Could not activate hardening; restoring the previous SSH configuration.${NC}"
         /bin/bash "$backup/rollback.sh" "$backup" "$sshd_bin" "$config" || echo "Automatic restore failed. Backups: $backup"
         return 1
@@ -2633,20 +2622,20 @@ pushit_harden_server_wizard() {
     echo -e "${YELLOW}Hardening is temporary until you confirm. Automatic rollback in 5 minutes.${NC}"
     echo 'Keep this terminal open. In a NEW terminal on your computer, run:'
     if [ -n "$generated_key_name" ]; then
-        printf '  ssh -i "$HOME/.ssh/%s" -o IdentitiesOnly=yes -p %s -o PreferredAuthentications=publickey -o PasswordAuthentication=no %s@%s\n' "$generated_key_name" "$port" "$admin" "${server_ip:-SERVER_IP}"
+        printf '  ssh -i "$HOME/.ssh/%s" -o IdentitiesOnly=yes -p %s -o PreferredAuthentications=publickey -o PasswordAuthentication=no %s@%s\n' "$generated_key_name" "$port" "$ssh_user" "${server_ip:-SERVER_IP}"
     else
-        printf '  ssh -p %s -o PreferredAuthentications=publickey -o PasswordAuthentication=no %s@%s\n' "$port" "$admin" "${server_ip:-SERVER_IP}"
+        printf '  ssh -p %s -o PreferredAuthentications=publickey -o PasswordAuthentication=no %s@%s\n' "$port" "$ssh_user" "${server_ip:-SERVER_IP}"
     fi
-    echo 'After connecting, run: sudo -v'
+    echo 'After connecting, run: id -u (it should print 0).'
     # Checking real login requires possession of the private key on the client.
-    read -r -t 240 -p 'After BOTH login and sudo succeed, type KEEP to confirm (anything else restores SSH): ' confirmation || confirmation=''
+    read -r -t 240 -p 'After key-based root login succeeds, type KEEP to confirm (anything else restores SSH): ' confirmation || confirmation=''
     if [ "$confirmation" = KEEP ] && pushit_ssh_confirm_hardening "$backup"; then
         systemctl stop "$unit.timer" 2>/dev/null || true
-        echo -e "${GREEN}SSH hardened: administrator '${admin}', public-key login, root/password SSH disabled.${NC}"
+        echo -e "${GREEN}SSH hardened: root public-key login enabled; password-based SSH authentication disabled.${NC}"
         echo "Configuration backups: $backup"
     else
         /bin/bash "$backup/rollback.sh" "$backup" "$sshd_bin" "$config" || echo "Check rollback service: $unit.service (backups: $backup)"
-        echo -e "${YELLOW}Hardening was not confirmed. Previous SSH configuration restored, or restoration is pending in $unit.service. Administrator/key setup was kept.${NC}"
+        echo -e "${YELLOW}Hardening was not confirmed. Previous SSH configuration restored, or restoration is pending in $unit.service. Root key setup was kept.${NC}"
         return 1
     fi
 }
