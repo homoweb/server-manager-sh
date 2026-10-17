@@ -92,6 +92,12 @@ if [[ "${TEST_EFFECTIVE_FAIL:-0}" == 1 && "$1" == -T ]]; then
     echo 'passwordauthentication yes'
     exit 0
 fi
+if [[ "${TEST_LEGACY_ROOT_VALUE:-0}" == 1 && "$1" == -T ]]; then
+    output=$("$REAL_SSHD" "$@") || exit $?
+    output=$(printf '%s\n' "$output" | sed 's/^permitrootlogin prohibit-password$/permitrootlogin without-password/')
+    printf '%s\n' "$output"
+    exit 0
+fi
 exec "$REAL_SSHD" "$@"
 STUB
 cat > "$TEST_DIR/bin/ssh-keygen" <<'STUB'
@@ -149,7 +155,7 @@ EOF
     cp "$PUSHIT_SSH_CONFIG" "$TEST_DIR/original"
     cp "$TEST_DIR/includes/auth.conf" "$TEST_DIR/include-original"
     : > "$TEST_DIR/actions"
-    export TEST_TIMER_FAIL=0 TEST_RELOAD_FAIL=0 TEST_PASSWORD_FAIL=0 TEST_VALIDATE_FAIL=0 TEST_EFFECTIVE_FAIL=0 TEST_NO_SUDO=0 TEST_GENERATE_FAIL=0
+    export TEST_TIMER_FAIL=0 TEST_RELOAD_FAIL=0 TEST_PASSWORD_FAIL=0 TEST_VALIDATE_FAIL=0 TEST_EFFECTIVE_FAIL=0 TEST_LEGACY_ROOT_VALUE=0 TEST_NO_SUDO=0 TEST_GENERATE_FAIL=0
 }
 assert_generated_key_cleanup() {
     python3 - "$PUSHIT_SSH_BACKUP_DIR" "$PUSHIT_SSH_HOME_ROOT" "$TEST_DIR/key-tmp" <<'PY'
@@ -205,6 +211,11 @@ grep -q 'ssh -p 2222 .*root@192.0.2.10' "$TEST_DIR/success.log"
 [[ $(stat -f %Lp "$TEST_DIR/home/root/.ssh" 2>/dev/null || stat -c %a "$TEST_DIR/home/root/.ssh") == 700 ]] || fail 'SSH directory permissions'
 [[ $(stat -f %Lp "$TEST_DIR/home/root/.ssh/authorized_keys" 2>/dev/null || stat -c %a "$TEST_DIR/home/root/.ssh/authorized_keys") == 600 ]] || fail 'Key file permissions'
 echo 'PASS: root key-only login, preserved keys, permissions, temporary hardening and confirmed completion'
+
+reset_fixture
+TEST_LEGACY_ROOT_VALUE=1 harden_server <<< "$(root_key_input)" > "$TEST_DIR/legacy-root-value.log"
+grep -Fq 'SSH hardened: root public-key login enabled' "$TEST_DIR/legacy-root-value.log"
+echo 'PASS: legacy OpenSSH without-password spelling is accepted as key-only root policy'
 
 reset_fixture
 TEST_NO_SUDO=1 harden_server <<< "$(root_key_input)" > "$TEST_DIR/no-sudo-admin.log"

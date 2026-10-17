@@ -22,7 +22,7 @@ NPM_VERSION="12.0.3"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.2.1"
+PUSHIT_VERSION="0.2.2"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -2468,7 +2468,7 @@ pushit_ssh_confirm_hardening() {
 }
 
 pushit_ssh_verify_policy() {
-    local sshd_bin="$1" config="$2" target_user="$3" username output setting previous_user=''
+    local sshd_bin="$1" config="$2" target_user="$3" username output setting actual_setting previous_user=''
     local address="${SSH_CONNECTION:-}"
     address="${address%% *}"
     address="${address:-127.0.0.1}"
@@ -2477,8 +2477,14 @@ pushit_ssh_verify_policy() {
         previous_user="$username"
         output=$("$sshd_bin" -T -f "$config" -C "user=$username,addr=$address,host=$address") || return 1
         for setting in 'permitrootlogin prohibit-password' 'passwordauthentication no' 'kbdinteractiveauthentication no' 'pubkeyauthentication yes' 'authenticationmethods publickey'; do
+            # Older OpenSSH versions print the deprecated alias for the same policy.
+            if [ "$setting" = 'permitrootlogin prohibit-password' ] \
+                && printf '%s\n' "$output" | grep -Eq '^permitrootlogin (prohibit-password|without-password)$'; then
+                continue
+            fi
             if ! printf '%s\n' "$output" | grep -Fxq "$setting"; then
-                echo -e "${RED}Effective SSH policy for '${username}' did not match '${setting}'.${NC}"
+                actual_setting=$(printf '%s\n' "$output" | awk -v key="${setting%% *}" 'tolower($1) == key { print; exit }')
+                echo -e "${RED}Effective SSH policy for '${username}' was '${actual_setting:-not reported}'; expected '${setting}'.${NC}"
                 return 1
             fi
         done
