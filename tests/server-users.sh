@@ -200,7 +200,13 @@ grep -q -- '--- Server User Management ---' "$TEST_DIR/site-menu.log"
 pushit_show_banner() { :; }
 pushit_update_check() { :; }
 pushit_show_update_notice() { :; }
-PUSHIT_CONFIG="$TEST_DIR/no-config" show_menu <<< $'14\n0' > "$TEST_DIR/main-menu.log"
+PUSHIT_CONFIG="$TEST_DIR/no-config" show_menu <<< $'13\n0' > "$TEST_DIR/main-menu.log"
 grep -q -- '--- Server User Management ---' "$TEST_DIR/main-menu.log"
+user_menu_line=$(grep -n '13) Manage Server Users' "$TEST_DIR/main-menu.log" | cut -d: -f1)
+uninstall_menu_line=$(grep -n '14) Uninstall Pushit' "$TEST_DIR/main-menu.log" | cut -d: -f1)
+[[ "$uninstall_menu_line" -gt "$user_menu_line" ]] || { echo 'FAIL: Uninstall is not the final menu item' >&2; exit 1; }
+pushit_uninstall() { echo UNINSTALL_ROUTE; }
+PUSHIT_CONFIG="$TEST_DIR/no-config" show_menu <<< '14' > "$TEST_DIR/uninstall-menu.log"
+grep -q 'UNINSTALL_ROUTE' "$TEST_DIR/uninstall-menu.log"
 echo 'PASS: users without sites, empty list and main/site menu routing' 
 echo 'All server user checks passed.'

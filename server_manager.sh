@@ -22,7 +22,7 @@ NPM_VERSION="12.0.2"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.23"
+PUSHIT_VERSION="0.1.24"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -786,7 +786,249 @@ change_mirror() {
     done
 }
 
-install_stack() {
+pushit_stack_report_add() {
+    local state="$1" component="$2" details="$3" color
+    case "$state" in
+        OK) color="$GREEN"; PUSHIT_STACK_OK_COUNT=$((PUSHIT_STACK_OK_COUNT + 1)) ;;
+        WARN) color="$YELLOW"; PUSHIT_STACK_WARN_COUNT=$((PUSHIT_STACK_WARN_COUNT + 1)) ;;
+        ERROR) color="$RED"; PUSHIT_STACK_ERROR_COUNT=$((PUSHIT_STACK_ERROR_COUNT + 1)) ;;
+        *) color="$NC" ;;
+    esac
+    printf '  %b[%-5s]%b %-22s %s\n' "$color" "$state" "$NC" "$component" "$details"
+}
+
+pushit_stack_active_unit() {
+    local unit
+    for unit in "$@"; do
+        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+            printf '%s' "$unit"
+            return 0
+        fi
+    done
+    return 1
+}
+
+pushit_stack_report_commands() {
+    local component="$1" command_name
+    shift
+    local -a missing=()
+    for command_name in "$@"; do
+        command -v "$command_name" >/dev/null 2>&1 || missing+=("$command_name")
+    done
+    if [ "${#missing[@]}" -eq 0 ]; then
+        pushit_stack_report_add OK "$component" "All required commands are available."
+    else
+        pushit_stack_report_add ERROR "$component" "Missing commands: ${missing[*]}"
+    fi
+}
+
+pushit_stack_report_install_messages() {
+    local install_log="$1" installer_status="$2" line component state
+    local warning_lines="" error_lines=""
+    if [ -z "$install_log" ] || [ ! -r "$install_log" ]; then
+        pushit_stack_report_add WARN "Installer output" "Could not capture the installation output."
+        return
+    fi
+    warning_lines=$(sed -E 's/\x1B\[[0-9;]*[[:alpha:]]//g' "$install_log" 2>/dev/null \
+        | grep -Eai 'SyntaxWarning:|DeprecationWarning:|(^|[[:space:]])W:|(^|[[:space:]])warn([[:space:]:]|$)' \
+        | awk 'NF && !seen[$0]++' || true)
+    error_lines=$(sed -E 's/\x1B\[[0-9;]*[[:alpha:]]//g' "$install_log" 2>/dev/null \
+        | grep -Eai '(^|[[:space:]])E:|(^|[[:space:]])Err:|dpkg:.*error|(^|[[:space:]])error:|Failed to fetch|failed([[:space:]]+to|[[:space:]]+with|[[:space:]]*$|:[[:space:]]*|[.]([[:space:]]|$))|ERROR([[:space:]:]|$)|npm ERR!|curl: \([0-9]+\)' \
+        | awk 'NF && !seen[$0]++' || true)
+
+    if [ -z "$warning_lines" ] && [ -z "$error_lines" ]; then
+        pushit_stack_report_add OK "Installer output" "No package warnings or errors were recorded."
+        return
+    fi
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        component="Installer warning"
+        [[ "${line,,}" == *fail2ban* ]] && component="Fail2ban warning"
+        pushit_stack_report_add WARN "$component" "$line"
+    done <<< "$warning_lines"
+    state=WARN
+    [ "$installer_status" -ne 0 ] && state=ERROR
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        component="Installer diagnostic"
+        [[ "${line,,}" == *fail2ban* ]] && component="Fail2ban diagnostic"
+        pushit_stack_report_add "$state" "$component" "$line"
+    done <<< "$error_lines"
+}
+
+pushit_stack_health_report() {
+    local install_log="${1:-}" installer_status="${2:-0}"
+    local active output version module_result
+    local ufw_output ufw_default ssh_ports port
+    local -a missing_ports=()
+
+    PUSHIT_STACK_OK_COUNT=0
+    PUSHIT_STACK_WARN_COUNT=0
+    PUSHIT_STACK_ERROR_COUNT=0
+    echo ""
+    echo "========== Full Stack Health Report =========="
+
+    pushit_stack_report_commands "Base utilities" lsb_release add-apt-repository curl wget git unzip
+
+    if ! command -v ufw >/dev/null 2>&1; then
+        pushit_stack_report_add ERROR "UFW" "Command not found."
+    else
+        ufw_output=$(LC_ALL=C ufw status verbose 2>&1)
+        if ! grep -q '^Status: active' <<< "$ufw_output"; then
+            pushit_stack_report_add ERROR "UFW" "Firewall is not active."
+        else
+            ufw_default=$(sed -n 's/^Default: //p' <<< "$ufw_output" | head -n 1)
+            ssh_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" && $2 ~ /^[0-9]+$/ {print $2}' | sort -nu)
+            [ -n "$ssh_ports" ] || ssh_ports=$(pushit_ssh_port 2>/dev/null || true)
+            for port in 80 443 ${ssh_ports}; do
+                grep -Eq "^${port}/tcp[[:space:]]+ALLOW IN([[:space:]]|$)" <<< "$ufw_output" || missing_ports+=("$port/tcp")
+            done
+            if [[ "$ufw_default" == *"deny (incoming)"* && "$ufw_default" == *"allow (outgoing)"* ]] && [ "${#missing_ports[@]}" -eq 0 ]; then
+                pushit_stack_report_add OK "UFW" "Active; incoming denied, outgoing allowed; SSH/HTTP/HTTPS rules found."
+            elif [ "${#missing_ports[@]}" -gt 0 ]; then
+                pushit_stack_report_add ERROR "UFW" "Required allow rules are missing: ${missing_ports[*]}."
+            else
+                pushit_stack_report_add ERROR "UFW" "Unexpected firewall defaults: ${ufw_default:-unavailable}."
+            fi
+        fi
+    fi
+
+    output=""
+    active=$(pushit_stack_active_unit fail2ban.service fail2ban 2>/dev/null || true)
+    if [ -n "$active" ] && command -v fail2ban-client >/dev/null 2>&1 && output=$(fail2ban-client ping 2>&1) && [[ "$output" == *pong* ]]; then
+        pushit_stack_report_add OK "Fail2ban" "Service active and client ping succeeded."
+    else
+        pushit_stack_report_add ERROR "Fail2ban" "Service or client ping failed: ${output:-not active or fail2ban-client missing}."
+    fi
+
+    output=""
+    active=$(pushit_stack_active_unit supervisor.service supervisor 2>/dev/null || true)
+    if [ -n "$active" ] && command -v supervisorctl >/dev/null 2>&1 && output=$(supervisorctl pid 2>&1); then
+        pushit_stack_report_add OK "Supervisor" "Service active; supervisor PID $output."
+    else
+        pushit_stack_report_add ERROR "Supervisor" "Service is inactive or supervisorctl could not connect: ${output:-not active or command missing}."
+    fi
+
+    output=""
+    active=$(pushit_stack_active_unit redis-server.service redis.service 2>/dev/null || true)
+    if [ -n "$active" ] && command -v redis-cli >/dev/null 2>&1 && output=$(redis-cli ping 2>&1) && [ "$output" = "PONG" ]; then
+        pushit_stack_report_add OK "Redis" "Service active and local PING returned PONG."
+    else
+        pushit_stack_report_add ERROR "Redis" "Service or local PING failed: ${output:-not active or redis-cli missing}."
+    fi
+
+    output=""
+    if ! command -v nginx >/dev/null 2>&1; then
+        pushit_stack_report_add ERROR "Nginx" "Command not found."
+    else
+        if output=$(nginx -t 2>&1); then
+            active=$(pushit_stack_active_unit nginx.service nginx 2>/dev/null || true)
+            if [ -n "$active" ]; then
+                pushit_stack_report_add OK "Nginx" "Configuration test passed; service active."
+            else
+                pushit_stack_report_add ERROR "Nginx" "Configuration is valid, but the service is not active."
+            fi
+        else
+            pushit_stack_report_add ERROR "Nginx" "Configuration test failed: ${output:-no details}."
+        fi
+    fi
+
+    if ! command -v php >/dev/null 2>&1; then
+        pushit_stack_report_add ERROR "PHP CLI" "Command not found."
+        pushit_stack_report_add ERROR "PHP extensions" "Cannot check extensions without PHP CLI."
+    else
+        version=$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null || true)
+        if [ "$version" = "$PHP_VERSION" ]; then
+            pushit_stack_report_add OK "PHP CLI" "Version $version installed."
+        else
+            pushit_stack_report_add ERROR "PHP CLI" "Expected $PHP_VERSION; found ${version:-unavailable}."
+        fi
+        if module_result=$(php -r '$required=["mysqli","pdo_mysql","pgsql","pdo_pgsql","redis","xml","mbstring","curl","zip","gd","bcmath"]; $missing=[]; foreach ($required as $name) { if (!extension_loaded($name)) $missing[]=$name; } if ($missing) { echo implode(", ", $missing); exit(1); }' 2>&1); then
+            pushit_stack_report_add OK "PHP extensions" "MySQL, PostgreSQL, Redis and requested runtime extensions are loaded."
+        else
+            pushit_stack_report_add ERROR "PHP extensions" "Missing or unavailable: ${module_result:-could not inspect PHP modules}."
+        fi
+    fi
+
+    output=""
+    active=$(pushit_stack_active_unit "php${PHP_VERSION}-fpm.service" "php${PHP_VERSION}-fpm" 2>/dev/null || true)
+    if command -v "php-fpm${PHP_VERSION}" >/dev/null 2>&1 && output=$("php-fpm${PHP_VERSION}" -t 2>&1) && [ -n "$active" ]; then
+        pushit_stack_report_add OK "PHP-FPM" "Configuration test passed; service $active is active."
+    else
+        pushit_stack_report_add ERROR "PHP-FPM" "Configuration test or service failed: ${output:-command missing or service inactive}."
+    fi
+
+    active=$(pushit_stack_active_unit mysql.service mysqld.service mysql mysqld 2>/dev/null || true)
+    output=""
+    if [ -z "$active" ]; then
+        pushit_stack_report_add ERROR "MySQL" "MySQL service is not active."
+    elif ! command -v mysql >/dev/null 2>&1; then
+        pushit_stack_report_add ERROR "MySQL" "mysql client command is not installed."
+    elif output=$(mysql -Nse 'SELECT 1' 2>&1) && [ "$(printf '%s' "$output" | tr -d '[:space:]')" = "1" ]; then
+        pushit_stack_report_add OK "MySQL" "Service active and local SELECT 1 succeeded."
+    else
+        pushit_stack_report_add ERROR "MySQL" "Local SQL check failed: ${output:-query returned an unexpected result}."
+    fi
+
+    output=""
+    if command -v psql >/dev/null 2>&1 && output=$(pushit_pg_psql --dbname=postgres -Atc 'SELECT 1' 2>&1) \
+        && [ "$(printf '%s' "$output" | tr -d '[:space:]')" = "1" ]; then
+        pushit_stack_report_add OK "PostgreSQL" "Local postgres query succeeded."
+    else
+        pushit_stack_report_add ERROR "PostgreSQL" "Local postgres query failed: ${output:-psql or local service unavailable}."
+    fi
+
+    version=$(node --version 2>/dev/null || true)
+    if [[ "$version" == "v${NODE_VERSION}."* ]]; then
+        pushit_stack_report_add OK "Node.js" "Version $version installed."
+    else
+        pushit_stack_report_add ERROR "Node.js" "Expected major $NODE_VERSION; found ${version:-unavailable}."
+    fi
+
+    version=$(npm --version 2>/dev/null || true)
+    if [ "$version" = "$NPM_VERSION" ]; then
+        pushit_stack_report_add OK "npm" "Pinned version $version installed."
+    else
+        pushit_stack_report_add ERROR "npm" "Expected $NPM_VERSION; found ${version:-unavailable}."
+    fi
+
+    output=""
+    if command -v composer >/dev/null 2>&1 && output=$(composer --version --no-ansi 2>&1); then
+        pushit_stack_report_add OK "Composer" "$output"
+    else
+        pushit_stack_report_add ERROR "Composer" "${output:-Command not found or version check failed}."
+    fi
+
+    output=""
+    version=""
+    if command -v certbot >/dev/null 2>&1 && version=$(certbot --version 2>&1); then
+        if output=$(certbot plugins 2>&1) && grep -qi nginx <<< "$output"; then
+            pushit_stack_report_add OK "Certbot" "$version; Nginx plugin available."
+        else
+            pushit_stack_report_add WARN "Certbot" "$version; Nginx plugin was not detected."
+        fi
+    else
+        pushit_stack_report_add ERROR "Certbot" "${version:-Command not found or version check failed}."
+    fi
+
+    pushit_stack_report_install_messages "$install_log" "$installer_status"
+    if [ "$installer_status" -ne 0 ]; then
+        pushit_stack_report_add ERROR "Full Stack installer" "Installer returned status $installer_status; review the output above."
+    fi
+
+    echo "-----------------------------------------------"
+    printf 'Result: %d OK, %d warning(s), %d error(s)\n' "$PUSHIT_STACK_OK_COUNT" "$PUSHIT_STACK_WARN_COUNT" "$PUSHIT_STACK_ERROR_COUNT"
+    if [ "$PUSHIT_STACK_ERROR_COUNT" -gt 0 ]; then
+        echo "Full Stack check completed with errors."
+        return 1
+    elif [ "$PUSHIT_STACK_WARN_COUNT" -gt 0 ]; then
+        echo "Full Stack check completed with warnings."
+    else
+        echo "All Full Stack checks passed."
+    fi
+}
+
+_pushit_install_stack_body() {
     export DEBIAN_FRONTEND=noninteractive
 
     echo -e "${YELLOW}Updating system packages...${NC}"
@@ -923,6 +1165,26 @@ install_stack() {
         return 1
     fi
     echo -e "${GREEN}Stack installed successfully.${NC}"
+}
+
+install_stack() {
+    local install_log="" installer_status report_status
+    install_log=$(mktemp /tmp/pushit-fullstack.XXXXXX 2>/dev/null) || install_log=""
+    if [ -n "$install_log" ]; then
+        _pushit_install_stack_body 2>&1 | tee "$install_log"
+        installer_status=${PIPESTATUS[0]}
+    else
+        _pushit_install_stack_body
+        installer_status=$?
+    fi
+    if pushit_stack_health_report "$install_log" "$installer_status"; then
+        report_status=0
+    else
+        report_status=$?
+    fi
+    [ -n "$install_log" ] && rm -f "$install_log"
+    if [ "$installer_status" -ne 0 ] || [ "$report_status" -ne 0 ]; then return 1; fi
+    return 0
 }
 
 pushit_render_site_vhost() {
@@ -2258,21 +2520,49 @@ KEYSAVE
     cp "$key_dir/private_key.pub" "$public_file"
 )
 
+pushit_ssh_admin_record() {
+    local username="$1" record uid home
+    if ! [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || [ "$username" = root ]; then return 1; fi
+    record=$(getent passwd "$username") || return 1
+    uid=$(printf '%s\n' "$record" | cut -d: -f3)
+    home=$(printf '%s\n' "$record" | cut -d: -f6)
+    if ! [[ "$uid" =~ ^[0-9]+$ ]] || [ "$uid" -eq 0 ] || [ "$home" != "${PUSHIT_SSH_HOME_ROOT:-/home}/$username" ]; then return 1; fi
+    if [ ! -d "$home" ] || [ -L "$home" ] || [ -L "$home/.ssh" ] || [ -L "$home/.ssh/authorized_keys" ]; then return 1; fi
+    if ! id -nG "$username" 2>/dev/null | tr ' ' '\n' | grep -Fxq sudo; then return 1; fi
+    printf '%s\n' "$record"
+}
+
 pushit_harden_server_wizard() {
     local config="${PUSHIT_SSH_CONFIG:-/etc/ssh/sshd_config}"
     local backup_root="${PUSHIT_SSH_BACKUP_DIR:-/var/backups/pushit/ssh}"
-    local root_keys="${PUSHIT_SSH_ROOT_KEYS:-/root/.ssh/authorized_keys}"
-    local home_root="${PUSHIT_SSH_HOME_ROOT:-/home}"
-    local admin default_admin record home group password repeat key_choice public_key key_file password_status
-    local sshd_bin backup unit confirmation port server_ip command_name pending generated_key_name='' missing=0 created=0
+    local admin record home group candidate key_choice public_key key_file
+    local sshd_bin backup unit confirmation port server_ip command_name pending generated_key_name='' missing=0
     echo -e "\n--- Guided SSH Hardening ---"
-    echo 'This wizard prepares a sudo administrator and public-key login before disabling root/password SSH.'
-    for command_name in python3 ssh-keygen sshd sudo useradd chpasswd passwd flock systemd-run; do
+    echo 'This wizard uses an existing sudo administrator and prepares public-key login before disabling root/password SSH.'
+    admin=''
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && record=$(pushit_ssh_admin_record "$SUDO_USER"); then
+        admin="$SUDO_USER"
+    else
+        while IFS=: read -r candidate _; do
+            [ -n "$candidate" ] || continue
+            [ "$candidate" != "${SUDO_USER:-}" ] || continue
+            if record=$(pushit_ssh_admin_record "$candidate"); then
+                admin="$candidate"
+                break
+            fi
+        done < <(getent passwd)
+    fi
+    if [ -z "$admin" ]; then
+        echo -e "${RED}No existing non-root sudo administrator with a usable /home/<user> account was found. Add one and run SSH Hardening again; no changes were made.${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}Using existing sudo administrator '${admin}'.${NC}"
+    for command_name in python3 ssh-keygen sshd sudo flock systemd-run; do
         command -v "$command_name" >/dev/null 2>&1 || missing=1
     done
     if [ "$missing" -eq 1 ]; then
         echo -e "${YELLOW}Installing required SSH administration tools...${NC}"
-        apt-get update && apt-get install -y openssh-server openssh-client sudo python3 util-linux passwd || return 1
+        apt-get update && apt-get install -y openssh-server openssh-client sudo python3 util-linux || return 1
     fi
     sshd_bin=$(command -v sshd) || return 1
     "$sshd_bin" -t -f "$config" || return 1
@@ -2282,75 +2572,24 @@ pushit_harden_server_wizard() {
         backup=${pending%/pending}
         /bin/bash "$backup/rollback.sh" "$backup" "$sshd_bin" "$config" || return 1
     done
-    default_admin=pushit-admin
-    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then default_admin="$SUDO_USER"; fi
-    while true; do
-        read -r -p "Administrator username [${default_admin}] (0 to cancel): " admin || return 1
-        admin="${admin:-$default_admin}"
-        [ "$admin" != 0 ] || return 0
-        if ! [[ "$admin" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || [ "$admin" = root ]; then
-            echo -e "${RED}Choose a valid non-root administrator username.${NC}"
-            continue
-        fi
-        if record=$(getent passwd "$admin"); then
-            if [ "$(printf '%s\n' "$record" | cut -d: -f3)" = 0 ]; then
-                echo -e "${RED}Accounts with UID 0 cannot be the recovery administrator.${NC}"
-                continue
-            fi
-            if ! id -nG "$admin" | tr ' ' '\n' | grep -Fxq sudo; then
-                echo -e "${RED}That account is not an administrator. Choose a sudo user or a new dedicated account.${NC}"
-                continue
-            fi
-        else
-            if ! useradd -m -s /bin/bash -G sudo "$admin"; then return 1; fi
-            created=1
-            record=$(getent passwd "$admin") || return 1
-            echo -e "${GREEN}Administrator '${admin}' created.${NC}"
-        fi
-        break
-    done
     home=$(printf '%s\n' "$record" | cut -d: -f6)
     group=$(id -gn "$admin") || return 1
-    if [ "$home" != "$home_root/$admin" ] || [ -L "$home" ] || [ -L "$home/.ssh" ] || [ -L "$home/.ssh/authorized_keys" ]; then
-        echo -e "${RED}The administrator needs a regular /home/${admin} directory and SSH key files.${NC}"
-        return 1
-    fi
-    password_status=$(passwd -S "$admin" 2>/dev/null | awk '{print $2}') || password_status=''
-    if [ "$created" -eq 1 ] || [ "$password_status" = L ] || [ "$password_status" = NP ]; then
-        while true; do
-            read -r -sp 'Set administrator password (used for sudo): ' password || return 1
-            echo ''
-            read -r -sp 'Repeat administrator password: ' repeat || return 1
-            echo ''
-            if [ -z "$password" ] || [ "$password" != "$repeat" ]; then
-                echo -e "${RED}Passwords must be nonempty and match.${NC}"
-                continue
-            fi
-            if ! (set -o pipefail; printf '%s:%s\n' "$admin" "$password" | chpasswd); then return 1; fi
-            unset password repeat
-            break
-        done
-    fi
     mkdir -p "$backup_root" || return 1
     chmod 700 "$backup_root" || return 1
     backup=$(mktemp -d "$backup_root/hardening.XXXXXX") || return 1
     key_file="$backup/selected_keys"
     while true; do
         echo 'Provide your own public key or let Pushit generate a new key pair:'
-        echo "1) Use this administrator's existing authorized keys"
-        echo '2) Copy existing root authorized keys to the administrator'
-        echo "3) Paste your computer's SSH public key here"
-        echo '4) Generate a new key pair and show BOTH keys for saving on your computer'
+        echo "1) Paste your computer's SSH public key"
+        echo '2) Generate a new key pair and show BOTH keys for saving on your computer'
         echo '0) Cancel (SSH policy remains unchanged)'
-        read -r -p 'Key source [3]: ' key_choice || return 1
-        case "${key_choice:-3}" in
-            1) [ -f "$home/.ssh/authorized_keys" ] && cp "$home/.ssh/authorized_keys" "$key_file" || { echo 'No keys found for this administrator.'; continue; } ;;
-            2) [ -f "$root_keys" ] && cp "$root_keys" "$key_file" || { echo 'No root authorized keys found. Choose option 3.'; continue; } ;;
-            3)
+        read -r -p 'Key source [1]: ' key_choice || return 1
+        case "${key_choice:-1}" in
+            1)
                 read -r -p 'Paste PUBLIC key (ssh-ed25519/ssh-rsa/...; never a private key): ' public_key || return 1
                 printf '%s\n' "$public_key" > "$key_file"
                 ;;
-            4)
+            2)
                 generated_key_name="pushit_${admin}_${backup##*.}"
                 pushit_ssh_generate_client_key "$key_file" "$generated_key_name" "$admin" || return 1
                 ;;
@@ -2368,7 +2607,7 @@ pushit_harden_server_wizard() {
     # Keep existing keys and append validated input without replacing access.
     touch "$home/.ssh/authorized_keys" || return 1
     chmod 600 "$home/.ssh/authorized_keys" || return 1
-    if [ "$key_choice" != 1 ]; then
+    if ! grep -Fqx -f "$key_file" "$home/.ssh/authorized_keys"; then
         { printf '\n'; cat "$key_file"; } >> "$home/.ssh/authorized_keys" || return 1
     fi
     chown "$admin:$group" "$home/.ssh" "$home/.ssh/authorized_keys" || return 1
@@ -3456,8 +3695,8 @@ show_menu() {
     else
         echo "12) Update Script (from GitHub)"
     fi
-    echo -e "${RED}13) Uninstall Pushit (remove script & cache)${NC}"
-    echo "14) Manage Server Users (List / Password / Delete)"
+    echo "13) Manage Server Users (List / Password / Delete)"
+    echo -e "${RED}14) Uninstall Pushit (remove script & cache)${NC}"
     read -r -p "Option [u=update]: " OPT
     # Shortcut: 'u' / 'U' triggers update when available, or anyway
     if [[ "$OPT" =~ ^[uU]$ ]]; then OPT="12"; fi
@@ -3475,8 +3714,8 @@ show_menu() {
         10) manage_dns ;;
         11) pushit_first_run_wizard ;;
         12) pushit_update_script ;;
-        13) pushit_uninstall ;;
-        14) manage_server_users ;;
+        13) manage_server_users ;;
+        14) pushit_uninstall ;;
         *) echo "Invalid option." ;;
     esac
 }
