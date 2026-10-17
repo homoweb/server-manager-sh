@@ -42,7 +42,7 @@ nginx() {
 }
 systemctl() {
     printf 'systemctl %s\n' "$*" >> "$TEST_DIR/actions"
-    if [[ "$*" == 'is-active --quiet pushit-ai@'* ]]; then [[ "${TEST_AI_ACTIVE:-0}" == 1 ]]; else return 0; fi
+    return 0
 }
 sshd() { printf 'sshd %s\n' "$*" >> "$TEST_DIR/actions"; }
 supervisorctl() { printf 'supervisorctl %s\n' "$*" >> "$TEST_DIR/actions"; }
@@ -107,7 +107,7 @@ POOL
     printf 'site content\n'  > "$TEST_DIR/home/alice/site-file"
     : > "$TEST_DIR/actions"
     rm -f "$TEST_DIR/password-input"
-    TEST_USERDEL_FAIL=0 TEST_NGINX_FAIL=0 TEST_PROCESSES=0 TEST_AI_ACTIVE=0 TEST_PASSWORD_STATUS=0 TEST_LOGGED_IN=''
+    TEST_USERDEL_FAIL=0 TEST_NGINX_FAIL=0 TEST_PROCESSES=0 TEST_PASSWORD_STATUS=0 TEST_LOGGED_IN=''
 }
 reset_fixture
 list_server_users > "$TEST_DIR/list.log"
@@ -164,12 +164,11 @@ TEST_NGINX_FAIL=1 expect_failure delete_server_user <<< $'alice\nalice'
 [[ -f "$TEST_DIR/available/a.test" && -L "$TEST_DIR/enabled/a.test" && -f "$TEST_DIR/php/8.4/fpm/pool.d/alice.conf" ]] || fail 'Validation failure did not restore configs'
 if grep -q '^userdel' "$TEST_DIR/actions"; then fail 'Account removed after validation failure'; fi
 reset_fixture
-TEST_AI_ACTIVE=1 TEST_USERDEL_FAIL=1 expect_failure delete_server_user <<< $'alice\nalice'
+TEST_USERDEL_FAIL=1 expect_failure delete_server_user <<< $'alice\nalice'
 [[ -f "$TEST_DIR/available/a.test" && -L "$TEST_DIR/enabled/a.test" && -f "$TEST_DIR/supervisor/alice.conf" && -f "$TEST_DIR/home/alice/site-file" ]] || fail 'Account failure lost original configs/home'
 grep -q '^Match User alice$' "$PUSHIT_USERS_SSH_CONFIG"
-grep -q 'systemctl start pushit-ai@alice' "$TEST_DIR/actions"
 grep -q 'crontab -u alice .*crontab' "$TEST_DIR/actions"
-echo 'PASS: validation/account failure rollback, symlink restoration, cron and AI recovery'
+echo 'PASS: validation/account failure rollback, symlink restoration and cron recovery'
 
 reset_fixture
 TEST_PROCESSES=1 expect_failure delete_server_user <<< $'alice\nalice'
@@ -196,12 +195,12 @@ printf 'root:x:0:0:root:/root:/bin/bash\n' > "$PUSHIT_USERS_PASSWD_FILE"
 list_server_users > "$TEST_DIR/empty-list.log"
 grep -q 'No local server users found.' "$TEST_DIR/empty-list.log"
 manage_server_users <<< $'1\n0' > /dev/null
-manage_sites <<< $'7\n0\n0' > "$TEST_DIR/site-menu.log"
+manage_sites <<< $'6\n0\n0' > "$TEST_DIR/site-menu.log"
 grep -q -- '--- Server User Management ---' "$TEST_DIR/site-menu.log"
 pushit_show_banner() { :; }
 pushit_update_check() { :; }
 pushit_show_update_notice() { :; }
-PUSHIT_CONFIG="$TEST_DIR/no-config" show_menu <<< $'15\n0' > "$TEST_DIR/main-menu.log"
+PUSHIT_CONFIG="$TEST_DIR/no-config" show_menu <<< $'14\n0' > "$TEST_DIR/main-menu.log"
 grep -q -- '--- Server User Management ---' "$TEST_DIR/main-menu.log"
 echo 'PASS: users without sites, empty list and main/site menu routing' 
 echo 'All server user checks passed.'

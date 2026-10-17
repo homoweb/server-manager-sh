@@ -22,7 +22,7 @@ NPM_VERSION="12.0.2"
 
 PUSHIT_BIN="/usr/local/bin/pushit"
 PUSHIT_CONFIG="/etc/pushit.conf"
-PUSHIT_VERSION="0.1.19"
+PUSHIT_VERSION="0.1.23"
 PUSHIT_REPO="homoweb/server-manager-sh"
 PUSHIT_REMOTE_URL="https://raw.githubusercontent.com/${PUSHIT_REPO}/main/server_manager.sh"
 PUSHIT_UPDATE_TTL=21600
@@ -32,14 +32,6 @@ PUSHIT_DL_DIR="/var/lib/pushit/downloads"
 PUSHIT_DL_PORT="8787"
 PUSHIT_DL_SERVER="/usr/local/bin/pushit-dl-server.py"
 PUSHIT_DL_LOG="/var/log/pushit-dl.log"
-
-# --- AI Agent paths ---
-PUSHIT_AI_DIR="/etc/pushit/ai"
-PUSHIT_AI_SERVER_CONF="${PUSHIT_AI_DIR}/server.json"
-PUSHIT_AI_BIN="/usr/local/bin/pushit-ai-agent"
-PUSHIT_AI_LOG_DIR="/var/log/pushit-ai"
-PUSHIT_AI_DEFAULT_PROVIDER="9router"
-PUSHIT_AI_DEFAULT_MODEL="gpt-5-codex"
 
 check_root() {
     if [ "$EUID" -ne 0 ]; then
@@ -101,6 +93,60 @@ pushit_ssh_port() {
     if ! [[ "$_port" =~ ^[0-9]+$ ]]; then _port="22"; fi
     echo "$_port"
 }
+
+pushit_ufw_apply_baseline() {
+    local sshd_bin ssh_ports port
+    if ! command -v ufw >/dev/null 2>&1; then
+        echo -e "${RED}UFW is not installed; firewall defaults were not changed.${NC}"
+        return 1
+    fi
+    sshd_bin=$(command -v sshd) || {
+        echo -e "${RED}OpenSSH server was not found; refusing to enable UFW without protecting SSH access.${NC}"
+        return 1
+    }
+    ssh_ports=$("$sshd_bin" -T 2>/dev/null | awk '$1 == "port" && $2 ~ /^[0-9]+$/ {print $2}' | sort -nu)
+    if [ -z "$ssh_ports" ]; then
+        echo -e "${RED}Could not determine the active SSH port; UFW was not enabled.${NC}"
+        return 1
+    fi
+    for port in $ssh_ports; do
+        if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ] || ! ufw allow "${port}/tcp"; then
+            echo -e "${RED}Could not allow SSH port ${port}/tcp; UFW defaults were not changed.${NC}"
+            return 1
+        fi
+    done
+    ufw allow 80/tcp || return 1
+    ufw allow 443/tcp || return 1
+    ufw default deny incoming || return 1
+    ufw default allow outgoing || return 1
+    if ! ufw status 2>/dev/null | grep -q '^Status: active'; then
+        ufw --force enable || return 1
+    else
+        ufw reload || return 1
+    fi
+    echo -e "${GREEN}UFW active: SSH (${ssh_ports}), HTTP (80) and HTTPS (443) allowed; other unsolicited inbound traffic denied.${NC}"
+    echo -e "${YELLOW}Existing explicit UFW rules were preserved. Review them with menu 5 and remove rules you no longer need.${NC}"
+}
+
+pushit_ufw_validate_rule() {
+    local input="$1" port protocol
+    if ! [[ "$input" =~ ^([0-9]{1,5})(/(tcp|udp))?$ ]]; then return 1; fi
+    port="${BASH_REMATCH[1]}"
+    protocol="${BASH_REMATCH[3]:-tcp}"
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+    printf '%s/%s\n' "$port" "$protocol"
+}
+
+pushit_ufw_validate_source() {
+    python3 - "$1" <<'PYIP'
+import ipaddress, sys
+try:
+    print(ipaddress.ip_network(sys.argv[1], strict=False))
+except ValueError:
+    sys.exit(1)
+PYIP
+}
+
 pushit_is_laravel() {
     local _dir="$1"
     [ -f "${_dir}/artisan" ] && return 0
@@ -141,7 +187,9 @@ pushit_first_run_wizard() {
             break
         done
         pushit_write_config "ip" "$port"
-        if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow "$port/tcp" >/dev/null 2>&1 || ufw allow "$port" >/dev/null 2>&1 || true; echo -e "${GREEN}UFW: allowed $port/tcp${NC}"; fi
+        if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+            echo -e "${YELLOW}UFW is active. Open ${port}/tcp from menu 5 only if this custom port must be public.${NC}"
+        fi
         echo ""; echo -e "${GREEN}Setup complete: server will run on IP with port $port${NC}"
     else
         local domain=""
@@ -329,7 +377,6 @@ pushit_uninstall() {
     pkill -f "$PUSHIT_DL_SERVER" 2>/dev/null || true
     rm -rf "$PUSHIT_DL_DIR" 2>/dev/null || true
     rm -f "$PUSHIT_DL_SERVER" "$PUSHIT_DL_LOG" 2>/dev/null || true
-    if command -v ufw >/dev/null 2>&1; then ufw delete allow "${PUSHIT_DL_PORT}/tcp" 2>/dev/null || true; fi
     hash -r 2>/dev/null || true
     if [ -n "$cur" ]; then
         read -r -p "Also remove current file '$cur'? (y/n): " RM_CUR
@@ -475,10 +522,6 @@ pushit_is_installed() {
 
 pushit_dl_ensure_server() {
     pushit_dl_init_python_server
-    # Always ensure firewall is open
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-        ufw allow "${PUSHIT_DL_PORT}/tcp" >/dev/null 2>&1 || true
-    fi
     # Systemd: (re)create units and restart to pick up new python code
     if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
         cat > /etc/systemd/system/pushit-dl.service <<EOF2
@@ -776,10 +819,20 @@ install_stack() {
     else
         rm -f "$_chk"
     fi
+    if ! apt-get install -y ufw; then
+        echo -e "${RED}Could not install UFW; stack installation stopped before changing SSH access.${NC}"
+        unset DEBIAN_FRONTEND
+        return 1
+    fi
+    if ! pushit_ufw_apply_baseline; then
+        echo -e "${RED}Could not establish the firewall baseline. Stack installation stopped before upgrading or installing public services.${NC}"
+        unset DEBIAN_FRONTEND
+        return 1
+    fi
     apt-get upgrade -y
 
     echo -e "${YELLOW}Installing base packages...${NC}"
-    apt-get install -y lsb-release software-properties-common curl wget git unzip ufw fail2ban supervisor redis-server
+    apt-get install -y lsb-release software-properties-common curl wget git unzip fail2ban supervisor redis-server
     
     # PHP (the ondrej/php PPA only supports Ubuntu LTS codenames)
     CODENAME=$(lsb_release -cs)
@@ -865,7 +918,6 @@ install_stack() {
     echo -e "${YELLOW}check DNS (just configured above), UFW rules and any provider-side filtering.${NC}"
 
     unset DEBIAN_FRONTEND
-    copy_ai_source_files
     if [ "$postgres_ready" -ne 1 ]; then
         echo -e "${YELLOW}Stack installation finished, but PostgreSQL is not ready. Retry its installation from Manage DB.${NC}"
         return 1
@@ -873,37 +925,121 @@ install_stack() {
     echo -e "${GREEN}Stack installed successfully.${NC}"
 }
 
-# ── Copy AI Agent source to /etc/pushit/ai/ (bundled) ─────────────────────
-copy_ai_source_files() {
-    if [ ! -d "$PUSHIT_AI_DIR" ]; then
-        mkdir -p "$PUSHIT_AI_DIR/templates" || {
-            echo -e "${RED}Cannot create $PUSHIT_AI_DIR. Run with sudo.${NC}"
-            return 1
-        }
+pushit_render_site_vhost() {
+    local DOMAIN="$1" USERNAME="$2" SN_LINE dot_count
+    dot_count=$(printf '%s' "$DOMAIN" | tr -cd '.' | wc -c)
+    if [ "$dot_count" -ge 2 ]; then
+        SN_LINE="server_name ${DOMAIN};"
+    else
+        SN_LINE="server_name ${DOMAIN} www.${DOMAIN};"
     fi
-    if [ ! -f "$PUSHIT_AI_DIR/pushit-ai-agent.py" ]; then
-        python3 << 'PYEOF'
-import base64, os
-d = 'IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiJwdXNoaXQtYWktYWdlbnQg4oCUIENMSSAmIEhUVFAgYWdlbnQgZm9yIFB1c2hpdCBBSSAoT3BlbkFJLWNvbXBhdGlibGUgQVBJKSIiIgppbXBvcnQgb3MsIHN5cywganNvbiwgdXJsbGliLnJlcXVlc3QsIHVybGxpYi5lcnJvciwgYXJncGFyc2UsIHRleHR3cmFwCmZyb20gZGF0ZXRpbWUgaW1wb3J0IGRhdGV0aW1lCmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKQUlfRElSICAgICAgPSAiL2V0Yy9wdXNoaXQvYWkiClNFUlZFUl9DT05GID0gZiJ7QUlfRElSfS9zZXJ2ZXIuanNvbiIKCmRlZiBsb2FkX2NvbmYocGF0aCk6CiAgICB0cnk6CiAgICAgICAgd2l0aCBvcGVuKHBhdGgpIGFzIGY6IHJldHVybiBqc29uLmxvYWQoZikKICAgIGV4Y2VwdCBFeGNlcHRpb246IHJldHVybiB7fQoKZGVmIGxvYWRfcHJvamVjdF9jb25mKHByb2plY3RfcGF0aCk6CiAgICBpZiBwcm9qZWN0X3BhdGggYW5kIG9zLnBhdGguaXNmaWxlKGYie3Byb2plY3RfcGF0aH0vLnB1c2hpdC9haS9jb25maWcuanNvbiIpOgogICAgICAgIHJldHVybiBsb2FkX2NvbmYoZiJ7cHJvamVjdF9wYXRofS8ucHVzaGl0L2FpL2NvbmZpZy5qc29uIiksIGYie3Byb2plY3RfcGF0aH0vLnB1c2hpdC9haS9jb25maWcuanNvbiIKICAgIGlmIG9zLnBhdGguaXNmaWxlKFNFUlZFUl9DT05GKTogcmV0dXJuIGxvYWRfY29uZihTRVJWRVJfQ09ORiksIFNFUlZFUl9DT05GCiAgICByZXR1cm4gTm9uZSwgTm9uZQoKZGVmIGdhdGhlcl9jb250ZXh0KHByb2plY3RfcGF0aCwgbWF4X2ZpbGVzPTgpOgogICAgY3R4ID0geyJmaWxlcyI6IFtdLCAic3RydWN0dXJlIjogW119CiAgICByb290ID0gUGF0aChwcm9qZWN0X3BhdGgpCiAgICBpZiBub3Qgcm9vdC5pc19kaXIoKTogcmV0dXJuIGN0eAogICAgZm9yIHAgaW4gc29ydGVkKHJvb3QuaXRlcmRpcigpKToKICAgICAgICBpZiBwLm5hbWUuc3RhcnRzd2l0aCgiLiIpIG9yIHAubmFtZSBpbiAoInZlbmRvciIsICJub2RlX21vZHVsZXMiKTogY29udGludWUKICAgICAgICBjdHhbInN0cnVjdHVyZSJdLmFwcGVuZChzdHIocC5yZWxhdGl2ZV90byhyb290KSkgKyAoIi8iIGlmIHAuaXNfZGlyKCkgZWxzZSAiIikpCiAgICBmb3IgcGF0IGluIFsiUkVBRE1FLm1kIiwicGFja2FnZS5qc29uIiwiY29tcG9zZXIuanNvbiIsIi5lbnYuZXhhbXBsZSIsCiAgICAgICAgICAgICAgICAicm91dGVzL3dlYi5waHAiLCJyb3V0ZXMvYXBpLnBocCIsImJvb3RzdHJhcC9hcHAucGhwIiwKICAgICAgICAgICAgICAgICJ2aXRlLmNvbmZpZy5qcyIsIkRvY2tlcmZpbGUiXToKICAgICAgICBmdWxsID0gcm9vdCAvIHBhdAogICAgICAgIGlmIGZ1bGwuZXhpc3RzKCk6CiAgICAgICAgICAgIHRyeTogY3R4WyJmaWxlcyJdLmFwcGVuZCh7InBhdGgiOiBwYXQsICJjb250ZW50IjogZnVsbC5yZWFkX3RleHQoZXJyb3JzPSJpZ25vcmUiKVs6MjUwMF19KQogICAgICAgICAgICBleGNlcHQgRXhjZXB0aW9uOiBwYXNzCiAgICAgICAgaWYgbGVuKGN0eFsiZmlsZXMiXSkgPj0gbWF4X2ZpbGVzOiBicmVhawogICAgcmV0dXJuIGN0eAoKZGVmIGJ1aWxkX3N5c3RlbV9wcm9tcHQocHJvamVjdF9wYXRoLCB1c2VybmFtZSk6CiAgICBsaW5lcyA9IFsiWW91IGFyZSBhIGhlbHBmdWwgQUkgYXNzaXN0YW50IGludGVncmF0ZWQgaW50byB0aGUgUHVzaGl0IHNlcnZlciBtYW5hZ2VyLiIsCiAgICAgICAgICAgICAiWW91IGhlbHAgZGV2ZWxvcGVycyBidWlsZCwgZGVidWcsIGFuZCBtYWludGFpbiB0aGVpciBwcm9qZWN0cy4iLCAiIl0KICAgIGlmIHByb2plY3RfcGF0aDoKICAgICAgICBjdHggPSBnYXRoZXJfY29udGV4dChwcm9qZWN0X3BhdGgpCiAgICAgICAgaWYgY3R4WyJmaWxlcyJdOgogICAgICAgICAgICBsaW5lcy5hcHBlbmQoIiMjIFByb2plY3QgQ29udGV4dCIpCiAgICAgICAgICAgIGZvciBmIGluIGN0eFsiZmlsZXMiXToKICAgICAgICAgICAgICAgIGxpbmVzLmFwcGVuZChmIlxuIyMjIHtmWydwYXRoJ119XG5gYGBcbntmWydjb250ZW50J119XG5gYGAiKQogICAgICAgIGlmIGN0eFsic3RydWN0dXJlIl06CiAgICAgICAgICAgIGxpbmVzLmFwcGVuZCgiXG4jIyBQcm9qZWN0IFN0cnVjdHVyZSAodG9wLWxldmVsKSIpCiAgICAgICAgICAgIGZvciBzIGluIGN0eFsic3RydWN0dXJlIl1bOjI1XTogbGluZXMuYXBwZW5kKGYiICB7c30iKQogICAgbGluZXMuYXBwZW5kKCJcbkJlIGNvbmNpc2UsIGhlbHBmdWwsIGFuZCB3cml0ZSBjb2RlIGluIFBlcnNpYW4gb3IgRW5nbGlzaC4iKQogICAgcmV0dXJuICJcbiIuam9pbihsaW5lcykKCmRlZiBjYWxsX2FwaShtZXNzYWdlcywgY29uZik6CiAgICBiYXNlID0gKGNvbmYuZ2V0KCJhcGlfYmFzZV91cmwiKSBvciAiIikucnN0cmlwKCIvIikKICAgIGtleSAgPSBjb25mLmdldCgiYXBpX2tleSIpIG9yICIiCiAgICBtb2RlbD0gY29uZi5nZXQoIm1vZGVsIikgb3IgImdwdC01LWNvZGV4IgogICAgaWYgbm90IGJhc2Ugb3Igbm90IGtleTogcmV0dXJuIE5vbmUsICJDb25maWcgbWlzc2luZyBhcGlfYmFzZV91cmwgb3IgYXBpX2tleSIKICAgIHVybCA9IGYie2Jhc2V9L3YxL2NoYXQvY29tcGxldGlvbnMiCiAgICBib2R5ID0ganNvbi5kdW1wcyh7Im1vZGVsIjptb2RlbCwibWVzc2FnZXMiOm1lc3NhZ2VzLCJ0ZW1wZXJhdHVyZSI6MC43LCJtYXhfdG9rZW5zIjoyMDQ4fSkuZW5jb2RlKCkKICAgIHJlcSA9IHVybGxpYi5yZXF1ZXN0LlJlcXVlc3QodXJsLCBkYXRhPWJvZHksIG1ldGhvZD0iUE9TVCIpCiAgICByZXEuYWRkX2hlYWRlcigiQ29udGVudC1UeXBlIiwiYXBwbGljYXRpb24vanNvbiIpCiAgICByZXEuYWRkX2hlYWRlcigiQXV0aG9yaXphdGlvbiIsIGYiQmVhcmVyIHtrZXl9IikKICAgIHRyeToKICAgICAgICB3aXRoIHVybGxpYi5yZXF1ZXN0LnVybG9wZW4ocmVxLCB0aW1lb3V0PTYwKSBhcyByOgogICAgICAgICAgICBkID0ganNvbi5sb2FkcyhyLnJlYWQoKSkKICAgICAgICAgICAgcmV0dXJuIGRbImNob2ljZXMiXVswXVsibWVzc2FnZSJdWyJjb250ZW50Il0sIE5vbmUKICAgIGV4Y2VwdCB1cmxsaWIuZXJyb3IuSFRUUEVycm9yIGFzIGU6CiAgICAgICAgYiA9IGUucmVhZCgpLmRlY29kZShlcnJvcnM9Imlnbm9yZSIpCiAgICAgICAgcmV0dXJuIE5vbmUsIGYiSFRUUCB7ZS5jb2RlfToge2JbOjIwMF19IgogICAgZXhjZXB0IEV4Y2VwdGlvbiBhcyBlOiByZXR1cm4gTm9uZSwgc3RyKGUpCgpkZWYgbG9hZF9oaXN0KGNwKToKICAgIHRyeToKICAgICAgICB3aXRoIG9wZW4oZiJ7Y3B9Lmhpc3RvcnkuanNvbiIpIGFzIGY6IHJldHVybiBqc29uLmxvYWQoZikKICAgIGV4Y2VwdCBFeGNlcHRpb246IHJldHVybiBbXQoKZGVmIHNhdmVfaGlzdChjcCwgaCk6CiAgICB3aXRoIG9wZW4oZiJ7Y3B9Lmhpc3RvcnkuanNvbiIsInciKSBhcyBmOiBqc29uLmR1bXAoaCwgZiwgZW5zdXJlX2FzY2lpPUZhbHNlLCBpbmRlbnQ9MikKZGVmIGNtZF9jaGF0KGFyZ3MpOgogICAgcHJvaiA9IGFyZ3MucHJvamVjdCBvciBvcy5nZXRjd2QoKQogICAgY29uZiwgY3BhdGggPSBsb2FkX3Byb2plY3RfY29uZihwcm9qKQogICAgaWYgbm90IGNvbmY6IHByaW50KCJbcmVkXU5vIEFJIGNvbmZpZy4gUnVuICdwdXNoaXQtYWktYWdlbnQgc2V0dXAnIGZpcnN0LlsvcmVkXSIpOyBzeXMuZXhpdCgxKQogICAgc3lzdCA9IGJ1aWxkX3N5c3RlbV9wcm9tcHQocHJvaiwgYXJncy51c2VyIG9yIG9zLmVudmlyb24uZ2V0KCJVU0VSIiwiIikpCiAgICBoaXN0ID0gbG9hZF9oaXN0KGNwYXRoKQogICAgaWYgbm90IGhpc3Qgb3IgaGlzdFswXS5nZXQoInJvbGUiKSAhPSAic3lzdGVtIjoKICAgICAgICBoaXN0Lmluc2VydCgwLCB7InJvbGUiOiJzeXN0ZW0iLCJjb250ZW50IjpzeXN0fSkKICAgIHByaW50KGYiXG57Jz0nKjUwfVxuICBQdXNoaXQgQUkgQWdlbnQgIMK3ICBQcm92aWRlcjp7Y29uZi5nZXQoJ3Byb3ZpZGVyJywnLScpfSAgTW9kZWw6e2NvbmYuZ2V0KCdtb2RlbCcsJy0nKX1cbiAgUHJvamVjdDp7cHJvan1cbnsnPScqNTB9IikKICAgIHByaW50KCJUeXBlIGV4aXQvQ3RybCtEIHRvIGxlYXZlLiAvY29udGV4dCByZWxvYWQgL2NsZWFyIGVyYXNlIC9zdGF0dXMgc2hvdyIpCiAgICB3aGlsZSBUcnVlOgogICAgICAgIHRyeTogaW5wID0gaW5wdXQoIj4gIikuc3RyaXAoKQogICAgICAgIGV4Y2VwdCAoRU9GRXJyb3IsIEtleWJvYXJkSW50ZXJydXB0KTogcHJpbnQoIlxuQnllISIpOyBicmVhawogICAgICAgIGlmIG5vdCBpbnA6IGNvbnRpbnVlCiAgICAgICAgaWYgaW5wLmxvd2VyKCkgaW4gKCJleGl0IiwicXVpdCIpOiBwcmludCgiQnllISIpOyBicmVhawogICAgICAgIGlmIGlucCA9PSAiL2NsZWFyIjoKICAgICAgICAgICAgaGlzdCA9IFtoaXN0WzBdXSBpZiBoaXN0IGFuZCBoaXN0WzBdLmdldCgicm9sZSIpPT0ic3lzdGVtIiBlbHNlIFtdCiAgICAgICAgICAgIHNhdmVfaGlzdChjcGF0aCwgaGlzdCk7IHByaW50KCJbb2tdIGNsZWFyZWRcbiIpOyBjb250aW51ZQogICAgICAgIGlmIGlucCA9PSAiL2NvbnRleHQiOgogICAgICAgICAgICBzeXN0ID0gYnVpbGRfc3lzdGVtX3Byb21wdChwcm9qLCBhcmdzLnVzZXIgb3Igb3MuZW52aXJvbi5nZXQoIlVTRVIiLCIiKSkKICAgICAgICAgICAgaWYgaGlzdDogaGlzdFswXVsiY29udGVudCJdID0gc3lzdAogICAgICAgICAgICBzYXZlX2hpc3QoY3BhdGgsIGhpc3QpOyBwcmludCgiW29rXSBjb250ZXh0IHJlbG9hZGVkXG4iKTsgY29udGludWUKICAgICAgICBpZiBpbnAgPT0gIi9zdGF0dXMiOgogICAgICAgICAgICBwcmludChmIiAgUHJvdmlkZXI6e2NvbmYuZ2V0KCdwcm92aWRlcicsJy0nKX0gIE1vZGVsOntjb25mLmdldCgnbW9kZWwnLCctJyl9ICBNc2dzOntsZW4oW2ggZm9yIGggaW4gaGlzdCBpZiBoLmdldCgncm9sZScpPT0ndXNlciddKX1cbiIpOyBjb250aW51ZQogICAgICAgIGhpc3QuYXBwZW5kKHsicm9sZSI6InVzZXIiLCJjb250ZW50IjppbnB9KQogICAgICAgIHByaW50KCLij7MgIiwgZW5kPSIiLCBmbHVzaD1UcnVlKQogICAgICAgIHJlc3AsIGVyciA9IGNhbGxfYXBpKGhpc3QsIGNvbmYpCiAgICAgICAgcHJpbnQoIlxyICAgIiwgZW5kPSJcciIpCiAgICAgICAgaWYgZXJyOiBwcmludChmIltlcnJvcl0ge2Vycn0iKTsgaGlzdC5wb3AoKTsgcHJpbnQoKTsgY29udGludWUKICAgICAgICBoaXN0LmFwcGVuZCh7InJvbGUiOiJhc3Npc3RhbnQiLCJjb250ZW50IjpyZXNwfSkKICAgICAgICBpZiBsZW4oaGlzdCkgPiA0MjogaGlzdCA9IFtoaXN0WzBdXSArIGhpc3RbLTQwOl0KICAgICAgICBzYXZlX2hpc3QoY3BhdGgsIGhpc3QpCiAgICAgICAgcHJpbnQodGV4dHdyYXAuZmlsbChyZXNwLCB3aWR0aD04MCkpOyBwcmludCgpCmRlZiBjbWRfcXVlcnkoYXJncyk6CiAgICBwcm9qID0gYXJncy5wcm9qZWN0IG9yIG9zLmdldGN3ZCgpCiAgICBjb25mLCBfID0gbG9hZF9wcm9qZWN0X2NvbmYocHJvaikKICAgIGlmIG5vdCBjb25mOiBwcmludCgiTm8gQUkgY29uZmlnLiIsIGZpbGU9c3lzLnN0ZGVycik7IHN5cy5leGl0KDEpCiAgICBtc2dzID0gW3sicm9sZSI6InN5c3RlbSIsImNvbnRlbnQiOmJ1aWxkX3N5c3RlbV9wcm9tcHQocHJvaiwgIiIpfSwgeyJyb2xlIjoidXNlciIsImNvbnRlbnQiOmFyZ3MucHJvbXB0fV0KICAgIHJlc3AsIGVyciA9IGNhbGxfYXBpKG1zZ3MsIGNvbmYpCiAgICBpZiBlcnI6IHByaW50KGYiRXJyb3I6IHtlcnJ9IiwgZmlsZT1zeXMuc3RkZXJyKTsgc3lzLmV4aXQoMSkKICAgIHByaW50KHJlc3ApCgpkZWYgY21kX3NlcnZlKGFyZ3MpOgogICAgaW1wb3J0IGh0dHAuc2VydmVyLCBzb2NrZXRzZXJ2ZXIKICAgIFBPUlQgPSBhcmdzLnBvcnQgb3IgODc2NQogICAgY2xhc3MgSChodHRwLnNlcnZlci5CYXNlSFRUUFJlcXVlc3RIYW5kbGVyKToKICAgICAgICBkZWYgZG9fUE9TVChzZWxmKToKICAgICAgICAgICAgbG4gPSBpbnQoc2VsZi5oZWFkZXJzLmdldCgiQ29udGVudC1MZW5ndGgiLCAwKSkKICAgICAgICAgICAgYm9keSA9IGpzb24ubG9hZHMoc2VsZi5yZmlsZS5yZWFkKGxuKSkgaWYgbG4gZWxzZSB7fQogICAgICAgICAgICBtc2dzICA9IGJvZHkuZ2V0KCJtZXNzYWdlcyIsIFtdKQogICAgICAgICAgICBwcm9qICA9IGJvZHkuZ2V0KCJwcm9qZWN0X3BhdGgiLCAiIikKICAgICAgICAgICAgY29uZiwgY3AgPSBsb2FkX3Byb2plY3RfY29uZihwcm9qKSBpZiBwcm9qIGVsc2UgKE5vbmUsIE5vbmUpCiAgICAgICAgICAgIGlmIG5vdCBjb25mOiBjb25mLCBjcCA9IGxvYWRfcHJvamVjdF9jb25mKCIiKQogICAgICAgICAgICBpZiBub3QgY29uZjogc2VsZi5faih7ImVycm9yIjoiTm8gY29uZmlnIn0sIDUwMyk7IHJldHVybgogICAgICAgICAgICBzeXN0ID0gYnVpbGRfc3lzdGVtX3Byb21wdChwcm9qLCAiIikgaWYgcHJvaiBlbHNlICIiCiAgICAgICAgICAgIGhpc3QgPSBsb2FkX2hpc3QoY3ApCiAgICAgICAgICAgIGlmIHN5c3QgYW5kIChub3QgaGlzdCBvciBoaXN0WzBdLmdldCgicm9sZSIpIT0ic3lzdGVtIik6CiAgICAgICAgICAgICAgICBoaXN0Lmluc2VydCgwLCB7InJvbGUiOiJzeXN0ZW0iLCJjb250ZW50IjpzeXN0fSkKICAgICAgICAgICAgZWxpZiBub3Qgc3lzdCBhbmQgaGlzdCBhbmQgaGlzdFswXS5nZXQoInJvbGUiKT09InN5c3RlbSI6IGhpc3QgPSBoaXN0WzE6XQogICAgICAgICAgICBmb3IgbSBpbiBtc2dzOiBoaXN0LmFwcGVuZChtKQogICAgICAgICAgICByZXNwLCBlcnIgPSBjYWxsX2FwaShoaXN0LCBjb25mKQogICAgICAgICAgICBpZiBlcnI6IHNlbGYuX2ooeyJlcnJvciI6ZXJyfSwgNTAwKTsgcmV0dXJuCiAgICAgICAgICAgIGhpc3QuYXBwZW5kKHsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOnJlc3B9KQogICAgICAgICAgICBpZiBsZW4oaGlzdCkgPiA0MjogaGlzdCA9IFtoaXN0WzBdXSArIGhpc3RbLTQwOl0gaWYgaGlzdFswXS5nZXQoInJvbGUiKT09InN5c3RlbSIgZWxzZSBoaXN0Wy00MDpdCiAgICAgICAgICAgIHNhdmVfaGlzdChjcCwgaGlzdCkKICAgICAgICAgICAgc2VsZi5faih7InJlc3BvbnNlIjpyZXNwLCJoaXN0b3J5IjpoaXN0fSkKICAgICAgICBkZWYgX2ooc2VsZiwgZCwgc3Q9MjAwKToKICAgICAgICAgICAgYiA9IGpzb24uZHVtcHMoZCwgZW5zdXJlX2FzY2lpPUZhbHNlKS5lbmNvZGUoKQogICAgICAgICAgICBzZWxmLnNlbmRfcmVzcG9uc2Uoc3QpOyBzZWxmLnNlbmRfaGVhZGVyKCJDb250ZW50LVR5cGUiLCJhcHBsaWNhdGlvbi9qc29uIikKICAgICAgICAgICAgc2VsZi5zZW5kX2hlYWRlcigiQ29udGVudC1MZW5ndGgiLCBsZW4oYikpOyBzZWxmLmVuZF9oZWFkZXJzKCk7IHNlbGYud2ZpbGUud3JpdGUoYikKICAgICAgICBkZWYgZG9fR0VUKHNlbGYpOiBzZWxmLl9qKHsic2VydmljZSI6InB1c2hpdC1haSIsInN0YXR1cyI6InJ1bm5pbmcifSkKICAgICAgICBkZWYgbG9nX21lc3NhZ2Uoc2VsZiwgKmEpOiBwYXNzCiAgICB3aXRoIHNvY2tldHNlcnZlci5UQ1BTZXJ2ZXIoKCIxMjcuMC4wLjEiLCBQT1JUKSwgSCkgYXMgc3J2OgogICAgICAgIHByaW50KGYiUHVzaGl0IEFJIFNlcnZlciBvbiBodHRwOi8vMTI3LjAuMC4xOntQT1JUfSAgKEN0cmwrQyB0byBzdG9wKSIpCiAgICAgICAgdHJ5OiBzcnYuc2VydmVfZm9yZXZlcigpCiAgICAgICAgZXhjZXB0IEtleWJvYXJkSW50ZXJydXB0OiBwcmludCgiXG5TdG9wcGVkLiIpOyBzeXMuZXhpdCgwKQpkZWYgY21kX3N0YXR1cyhhcmdzKToKICAgIGNvbmYsIGNwID0gbG9hZF9wcm9qZWN0X2NvbmYoYXJncy5wcm9qZWN0IG9yICIiKQogICAgaWYgbm90IGNvbmY6IHByaW50KCJObyBBSSBjb25maWcuIik7IHN5cy5leGl0KDEpCiAgICBrID0gY29uZi5nZXQoImFwaV9rZXkiLCIiKQogICAgcHJpbnQoZiJDb25maWcgOiB7Y3B9IikKICAgIHByaW50KGYiUHJvdmlkZXI6e2NvbmYuZ2V0KCdwcm92aWRlcicsJy0nKX0gIE1vZGVsOntjb25mLmdldCgnbW9kZWwnLCctJyl9IikKICAgIHByaW50KGYiQmFzZSBVUkw6e2NvbmYuZ2V0KCdhcGlfYmFzZV91cmwnLCctJyl9IikKICAgIHByaW50KGYiQVBJIEtleSA6IHtrWzo0XX0qKioqe2tbLTI6XSBpZiBsZW4oayk+NiBlbHNlICcnfSIpCiAgICBwcmludChmIkVuYWJsZWQ6e2NvbmYuZ2V0KCdlbmFibGVkJyxGYWxzZSl9ICBJbnN0YWxsZWQ6e2NvbmYuZ2V0KCdpbnN0YWxsZWQnLEZhbHNlKX0iKQoKZGVmIGNtZF9zZXR1cChhcmdzKToKICAgIHByaW50KCItLS0gUHVzaGl0IEFJIFNldHVwIC0tLVxuIikKICAgIHByb3YgPSBpbnB1dCgiUHJvdmlkZXIgWzlyb3V0ZXJdOiAiKSBvciAiOXJvdXRlciIKICAgIGJhc2UgPSBpbnB1dCgiQVBJIEJhc2UgVVJMIDogIikKICAgIGtleSAgPSBpbnB1dCgiQVBJIEtleSAgICAgIDogIikKICAgIG1vZGVsPSBpbnB1dCgiTW9kZWwgW2dwdC01LWNvZGV4XTogIikgb3IgImdwdC01LWNvZGV4IgogICAgb3MubWFrZWRpcnMoQUlfRElSLCBleGlzdF9vaz1UcnVlKQogICAgY29uZiA9IHsiZW5hYmxlZCI6VHJ1ZSwicHJvdmlkZXIiOnByb3YsImFwaV9iYXNlX3VybCI6YmFzZSwKICAgICAgICAgICAgImFwaV9rZXkiOmtleSwibW9kZWwiOm1vZGVsLCJzY29wZSI6InNlcnZlciIsInBlcm1pc3Npb25zIjp7fSwKICAgICAgICAgICAgImluc3RhbGxlZCI6VHJ1ZSwicnVubmluZyI6RmFsc2UsInVwZGF0ZWRfYXQiOmRhdGV0aW1lLnV0Y25vdygpLmlzb2Zvcm1hdCgpKyJaIn0KICAgIHdpdGggb3BlbihTRVJWRVJfQ09ORiwgInciKSBhcyBmOiBqc29uLmR1bXAoY29uZiwgZiwgaW5kZW50PTQpCiAgICBvcy5jaG1vZChTRVJWRVJfQ09ORiwgMG82MDApCiAgICBwcmludChmIlxuW29rXSBDb25maWcgc2F2ZWQgdG8ge1NFUlZFUl9DT05GfSIpCgpkZWYgbWFpbigpOgogICAgcCA9IGFyZ3BhcnNlLkFyZ3VtZW50UGFyc2VyKGRlc2NyaXB0aW9uPSJQdXNoaXQgQUkgQWdlbnQiKQogICAgcyA9IHAuYWRkX3N1YnBhcnNlcnMoZGVzdD0iY21kIikKICAgIHBjPXMuYWRkX3BhcnNlcigiY2hhdCIpOyAgcGMuYWRkX2FyZ3VtZW50KCItLXByb2plY3QiLCItcCIpOyBwYy5hZGRfYXJndW1lbnQoIi0tdXNlciIsIi11IikKICAgIHBxPXMuYWRkX3BhcnNlcigicXVlcnkiKTsgcHEuYWRkX2FyZ3VtZW50KCJwcm9tcHQiKTsgcHEuYWRkX2FyZ3VtZW50KCItLXByb2plY3QiLCItcCIpOyBwcS5hZGRfYXJndW1lbnQoIi0tdXNlciIsIi11IikKICAgIHBzPXMuYWRkX3BhcnNlcigic2VydmUiKTsgcHMuYWRkX2FyZ3VtZW50KCItLXBvcnQiLHR5cGU9aW50LGRlZmF1bHQ9ODc2NSkKICAgIHBzdD1zLmFkZF9wYXJzZXIoInN0YXR1cyIpO3BzdC5hZGRfYXJndW1lbnQoIi0tcHJvamVjdCIsIi1wIikKICAgIHN1PXMuYWRkX3BhcnNlcigic2V0dXAiKQogICAgYT1wLnBhcnNlX2FyZ3MoKQogICAgaWYgbm90IGEuY21kOiBwLnByaW50X2hlbHAoKTsgc3lzLmV4aXQoMCkKICAgIHsiY2hhdCI6Y21kX2NoYXQsInF1ZXJ5IjpjbWRfcXVlcnksInNlcnZlIjpjbWRfc2VydmUsInN0YXR1cyI6Y21kX3N0YXR1cywic2V0dXAiOmNtZF9zZXR1cH1bYS5jbWRdKGEpCgppZiBfX25hbWVfXyA9PSAiX19tYWluX18iOiBtYWluKCkK'
-os.makedirs('$PUSHIT_AI_DIR', exist_ok=True)
-open('$PUSHIT_AI_DIR/pushit-ai-agent.py', 'wb').write(base64.b64decode(d))
-os.chmod('$PUSHIT_AI_DIR/pushit-ai-agent.py', 0o755)
-print('Agent written')
-PYEOF
-        echo -e "${GREEN}Agent binary bundled${NC}"
-    fi
-    if [ ! -f "$PUSHIT_AI_DIR/templates/ai.php" ]; then
-        python3 << 'PYEOF'
-import base64, os
-d = 'PD9waHAKLyoqCiAqIFB1c2hpdCBBSSBBUEkgRW5kcG9pbnQKICogUGxhY2UgYXQ6IC9ob21lLzx1c2VyPi88ZG9tYWluPi9wdWJsaWMvYXBpL2FpLnBocAogKi8KaGVhZGVyKCdDb250ZW50LVR5cGU6IGFwcGxpY2F0aW9uL2pzb24nKTsKaGVhZGVyKCdBY2Nlc3MtQ29udHJvbC1BbGxvdy1PcmlnaW46IConKTsKaGVhZGVyKCdBY2Nlc3MtQ29udHJvbC1BbGxvdy1NZXRob2RzOiBQT1NULCBPUFRJT05TJyk7CmhlYWRlcignQWNjZXNzLUNvbnRyb2wtQWxsb3ctSGVhZGVyczogQ29udGVudC1UeXBlJyk7CmlmICgkX1NFUlZFUlsnUkVRVUVTVF9NRVRIT0QnXSA9PT0gJ09QVElPTlMnKSB7IGh0dHBfcmVzcG9uc2VfY29kZSgyMDQpOyBleGl0OyB9CgpkZWZpbmUoJ1BVU0hJVF9BSV9ESVInLCAgICAgJy9ldGMvcHVzaGl0L2FpJyk7CmRlZmluZSgnUFVTSElUX1NFUlZFUl9DT05GJywgUFVTSElUX0FJX0RJUiAuICcvc2VydmVyLmpzb24nKTsKCmZ1bmN0aW9uIGFpX2xvYWRfanNvbihzdHJpbmcgJHApOiBhcnJheSB7CiAgICByZXR1cm4gZmlsZV9leGlzdHMoJHApID8gKGpzb25fZGVjb2RlKGZpbGVfZ2V0X2NvbnRlbnRzKCRwKSwgdHJ1ZSkgPzogW10pIDogW107Cn0KZnVuY3Rpb24gYWlfc2F2ZV9qc29uKHN0cmluZyAkcCwgYXJyYXkgJGQpOiB2b2lkIHsKICAgIGlmICghaXNfZGlyKGRpcm5hbWUoJHApKSkgbWtkaXIoZGlybmFtZSgkcCksIDA3NTUsIHRydWUpOwogICAgZmlsZV9wdXRfY29udGVudHMoJHAsIGpzb25fZW5jb2RlKCRkLCBKU09OX1VORVNDQVBFRF9VTklDT0RFIHwgSlNPTl9QUkVUVFlfUFJJTlQpKTsKfQpmdW5jdGlvbiBhaV9nZXRfY29uZig/c3RyaW5nICRwcm9qZWN0X3BhdGggPSBudWxsKTogP2FycmF5IHsKICAgIGlmICgkcHJvamVjdF9wYXRoICYmIGZpbGVfZXhpc3RzKCJ7JHByb2plY3RfcGF0aH0vLnB1c2hpdC9haS9jb25maWcuanNvbiIpKSB7CiAgICAgICAgJGQgPSBhaV9sb2FkX2pzb24oInskcHJvamVjdF9wYXRofS8ucHVzaGl0L2FpL2NvbmZpZy5qc29uIik7CiAgICAgICAgaWYgKCFlbXB0eSgkZCkpIHJldHVybiAkZDsKICAgIH0KICAgIHJldHVybiBhaV9sb2FkX2pzb24oUFVTSElUX1NFUlZFUl9DT05GKTsKfQpmdW5jdGlvbiBhaV9nZXRfaGlzdG9yeShzdHJpbmcgJGNvbmZfcGF0aCk6IGFycmF5IHsKICAgIHJldHVybiBhaV9sb2FkX2pzb24oInskY29uZl9wYXRofS5oaXN0b3J5Lmpzb24iKTsKfQpmdW5jdGlvbiBhaV9zYXZlX2hpc3Rvcnkoc3RyaW5nICRjb25mX3BhdGgsIGFycmF5ICRoKTogdm9pZCB7CiAgICBhaV9zYXZlX2pzb24oInskY29uZl9wYXRofS5oaXN0b3J5Lmpzb24iLCAkaCk7Cn0KZnVuY3Rpb24gYWlfYnVpbGRfY29udGV4dChzdHJpbmcgJHByb2plY3RfcGF0aCk6IHN0cmluZyB7CiAgICAkcGFydHMgPSBbXTsKICAgICRrZXlzID0gWydSRUFETUUubWQnLCdwYWNrYWdlLmpzb24nLCdjb21wb3Nlci5qc29uJywnLmVudi5leGFtcGxlJywKICAgICAgICAgICAgICdyb3V0ZXMvd2ViLnBocCcsJ3JvdXRlcy9hcGkucGhwJywnYm9vdHN0cmFwL2FwcC5waHAnLAogICAgICAgICAgICAgJ3ZpdGUuY29uZmlnLmpzJywnRG9ja2VyZmlsZScsJ2RvY2tlci1jb21wb3NlLnltbCddOwogICAgZm9yZWFjaCAoJGtleXMgYXMgJGtmKSB7CiAgICAgICAgJGZ1bGwgPSAkcHJvamVjdF9wYXRoLicvJy4ka2Y7CiAgICAgICAgaWYgKGZpbGVfZXhpc3RzKCRmdWxsKSkgewogICAgICAgICAgICAkYyA9IHN1YnN0cihmaWxlX2dldF9jb250ZW50cygkZnVsbCksIDAsIDIwMDApOwogICAgICAgICAgICAkcGFydHNbXSA9ICIjIyMgeyRrZn1cbmBgYFxueyRjfVxuYGBgIjsKICAgICAgICB9CiAgICB9CiAgICAkc3RydWN0ID0gW107CiAgICAkcm9vdCA9IG5ldyBEaXJlY3RvcnlJdGVyYXRvcigkcHJvamVjdF9wYXRoKTsKICAgIGZvcmVhY2ggKCRyb290IGFzICRlKSB7CiAgICAgICAgaWYgKCRlLT5pc0RvdCgpKSBjb250aW51ZTsKICAgICAgICAkbiA9ICRlLT5nZXRGaWxlbmFtZSgpOwogICAgICAgIGlmIChpbl9hcnJheSgkbiwgWycuZ2l0JywndmVuZG9yJywnbm9kZV9tb2R1bGVzJ10pKSBjb250aW51ZTsKICAgICAgICAkc3RydWN0W10gPSAoJGUtPmlzRGlyKCk/J1tkaXJdICc6J1tmaWxlXScpLiRuOwogICAgfQogICAgJHBhcnRzW10gPSAiIyMgU3RydWN0dXJlXG4iLmltcGxvZGUoIlxuIiwgYXJyYXlfc2xpY2UoJHN0cnVjdCwgMCwgMzApKTsKICAgIHJldHVybiBpbXBsb2RlKCJcblxuIiwgJHBhcnRzKTsKfQpmdW5jdGlvbiBhaV9jYWxsX2FwaShhcnJheSAkbXNncywgYXJyYXkgJGNvbmYpOiBhcnJheSB7CiAgICAkYmFzZSA9IHJ0cmltKCRjb25mWydhcGlfYmFzZV91cmwnXT8/JycsICcvJyk7CiAgICAka2V5ICA9ICRjb25mWydhcGlfa2V5J10/PycnOwogICAgJG1vZGVsPSAkY29uZlsnbW9kZWwnXT8/J2dwdC01LWNvZGV4JzsKICAgIGlmIChlbXB0eSgkYmFzZSkgfHwgZW1wdHkoJGtleSkpIHJldHVybiBbJ2Vycm9yJz0+J01pc3NpbmcgY29uZmlnJ107CiAgICAkYm9keSA9IGpzb25fZW5jb2RlKFsnbW9kZWwnPT4kbW9kZWwsJ21lc3NhZ2VzJz0+JG1zZ3MsJ3RlbXBlcmF0dXJlJz0+MC43LCdtYXhfdG9rZW5zJz0+MjA0OF0pOwogICAgJGN0eCA9IHN0cmVhbV9jb250ZXh0X2NyZWF0ZShbJ2h0dHAnPT5bJ21ldGhvZCc9PidQT1NUJywnaGVhZGVyJz0+WyJDb250ZW50LVR5cGU6IGFwcGxpY2F0aW9uL2pzb24iLCJBdXRob3JpemF0aW9uOiBCZWFyZXIgeyRrZXl9Il0sJ2NvbnRlbnQnPT4kYm9keSwndGltZW91dCc9PjYwXV0pOwogICAgdHJ5IHsKICAgICAgICAkciA9IGZpbGVfZ2V0X2NvbnRlbnRzKCJ7JGJhc2V9L3YxL2NoYXQvY29tcGxldGlvbnMiLCBmYWxzZSwgJGN0eCk7CiAgICAgICAgJGQgPSBqc29uX2RlY29kZSgkciwgdHJ1ZSk7CiAgICAgICAgaWYgKCFpc3NldCgkZFsnY2hvaWNlcyddWzBdWydtZXNzYWdlJ11bJ2NvbnRlbnQnXSkpIHRocm93IG5ldyBFeGNlcHRpb24oJGRbJ2Vycm9yJ11bJ21lc3NhZ2UnXT8/J2JhZCByZXNwb25zZScpOwogICAgICAgIHJldHVybiBbJ3Jlc3BvbnNlJz0+JGRbJ2Nob2ljZXMnXVswXVsnbWVzc2FnZSddWydjb250ZW50J10sJ2Vycm9yJz0+bnVsbF07CiAgICB9IGNhdGNoIChFeGNlcHRpb24gJGUpIHsgcmV0dXJuIFsncmVzcG9uc2UnPT5udWxsLCdlcnJvcic9PiRlLT5nZXRNZXNzYWdlKCldOyB9Cn0KCiRpbnB1dCA9IGpzb25fZGVjb2RlKGZpbGVfZ2V0X2NvbnRlbnRzKCdwaHA6Ly9pbnB1dCcpLCB0cnVlKSA/PyBbXTsKJG1lc3NhZ2VzICAgPSAkaW5wdXRbJ21lc3NhZ2VzJ10gPz8gW107CiRwcm9qZWN0UGF0aD0gJGlucHV0Wydwcm9qZWN0X3BhdGgnXSA/PyAnJzsKCmlmIChlbXB0eSgkbWVzc2FnZXMpKSB7IGh0dHBfcmVzcG9uc2VfY29kZSg0MDApOyBlY2hvIGpzb25fZW5jb2RlKFsnZXJyb3InPT4nTm8gbWVzc2FnZXMnXSk7IGV4aXQ7IH0KJGNvbmYgICA9IGFpX2dldF9jb25mKCRwcm9qZWN0UGF0aCk7CiRjb25mUGF0aCA9ICRwcm9qZWN0UGF0aCA/ICJ7JHByb2plY3RQYXRofS8ucHVzaGl0L2FpL2NvbmZpZy5qc29uIiA6IFBVU0hJVF9TRVJWRVJfQ09ORjsKaWYgKGVtcHR5KCRjb25mKSkgeyBodHRwX3Jlc3BvbnNlX2NvZGUoNTAzKTsgZWNobyBqc29uX2VuY29kZShbJ2Vycm9yJz0+J0FJIGNvbmZpZyBub3QgZm91bmQnXSk7IGV4aXQ7IH0KCiRzeXN0ICA9ICJZb3UgYXJlIGEgaGVscGZ1bCBBSSBhc3Npc3RhbnQgaW50ZWdyYXRlZCBpbnRvIHRoZSBQdXNoaXQgc2VydmVyIG1hbmFnZXIuXG5cbiI7CmlmICgkcHJvamVjdFBhdGggJiYgaXNfZGlyKCRwcm9qZWN0UGF0aCkpICRzeXN0IC49ICIjIyBQcm9qZWN0IENvbnRleHRcbiIuYWlfYnVpbGRfY29udGV4dCgkcHJvamVjdFBhdGgpLiJcblxuIjsKJHN5c3QgLj0gIkJlIGNvbmNpc2UsIGhlbHBmdWwsIGFuZCB3cml0ZSBjb2RlIGluIFBlcnNpYW4gb3IgRW5nbGlzaC4iOwoKJGhpc3QgPSBhaV9nZXRfaGlzdG9yeSgkY29uZlBhdGgpOwppZiAoZW1wdHkoJGhpc3QpIHx8ICgkaGlzdFswXVsncm9sZSddPz8nJykgIT09ICdzeXN0ZW0nKQogICAgYXJyYXlfdW5zaGlmdCgkaGlzdCwgWydyb2xlJz0+J3N5c3RlbScsJ2NvbnRlbnQnPT4kc3lzdF0pOwplbHNlCiAgICAkaGlzdFswXVsnY29udGVudCddID0gJHN5c3Q7CmZvcmVhY2ggKCRtZXNzYWdlcyBhcyAkbSkgJGhpc3RbXSA9ICRtOwoKJHJlc3VsdCA9IGFpX2NhbGxfYXBpKCRoaXN0LCAkY29uZik7CmlmICgkcmVzdWx0WydyZXNwb25zZSddKSB7CiAgICAkaGlzdFtdID0gWydyb2xlJz0+J2Fzc2lzdGFudCcsJ2NvbnRlbnQnPT4kcmVzdWx0WydyZXNwb25zZSddXTsKICAgIGlmIChjb3VudCgkaGlzdCkgPiA0MikgJGhpc3QgPSBbJGhpc3RbMF1dICsgYXJyYXlfc2xpY2UoJGhpc3QsIC00MCk7CiAgICBhaV9zYXZlX2hpc3RvcnkoJGNvbmZQYXRoLCAkaGlzdCk7Cn0KaHR0cF9yZXNwb25zZV9jb2RlKCRyZXN1bHRbJ2Vycm9yJ10gPyA1MDAgOiAyMDApOwplY2hvIGpzb25fZW5jb2RlKFsncmVzcG9uc2UnPT4kcmVzdWx0WydyZXNwb25zZSddLCdoaXN0b3J5Jz0+JGhpc3QsJ2Vycm9yJz0+JHJlc3VsdFsnZXJyb3InXV0sIEpTT05fVU5FU0NBUEVEX1VOSUNPREUpOwo='
-os.makedirs('$PUSHIT_AI_DIR/templates', exist_ok=True)
-open('$PUSHIT_AI_DIR/templates/ai.php', 'wb').write(base64.b64decode(d))
-print('PHP endpoint bundled')
-PYEOF
-        echo -e "${GREEN}PHP endpoint bundled${NC}"
-    fi
+    cat <<EOF
+server {
+    listen 80;
+    $SN_LINE
+    root /home/$USERNAME/$DOMAIN/public;
+
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-XSS-Protection "1; mode=block";
+    add_header X-Content-Type-Options "nosniff";
+
+    index index.html index.htm index.php;
+
+    charset utf-8;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location = /favicon.ico { access_log off; log_not_found off; }
+    location = /robots.txt  { access_log off; log_not_found off; }
+
+    error_page 404 /index.php;
+
+    location ~ \.php$ {
+        fastcgi_pass unix:/var/run/php/php${PHP_VERSION}-fpm-$USERNAME.sock;
+        fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
+        include fastcgi_params;
+    }
+
+    location ~ /\.(?!well-known).* {
+        deny all;
+    }
+
+}
+EOF
 }
 
+pushit_nginx_diagnostics() {
+    systemctl status nginx --no-pager -l 2>&1 || true
+    journalctl -u nginx -n 40 --no-pager 2>&1 || true
+}
+
+pushit_activate_site_vhost() {
+    local domain="$1" username="$2" candidate backup status=0 action
+    local available="${PUSHIT_NGINX_AVAILABLE_DIR:-/etc/nginx/sites-available}"
+    local enabled="${PUSHIT_NGINX_ENABLED_DIR:-/etc/nginx/sites-enabled}"
+    local vhost="$available/$domain" link="$enabled/$domain"
+    if ! [[ "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ && "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+        echo -e "${RED}Invalid site domain or username.${NC}"
+        return 1
+    fi
+    if [ -d "$vhost" ] || [ -d "$link" ]; then
+        echo -e "${RED}A directory occupies the site's Nginx configuration path.${NC}"
+        return 1
+    fi
+    mkdir -p "$available" "$enabled" || return 1
+    candidate=$(mktemp "$available/.pushit-vhost.XXXXXX") || return 1
+    if ! pushit_render_site_vhost "$domain" "$username" > "$candidate" || ! chmod 644 "$candidate"; then
+        rm -f "$candidate"
+        return 1
+    fi
+    backup=$(mktemp -d "$available/.pushit-vhost-backup.XXXXXX") || { rm -f "$candidate"; return 1; }
+    if [ -e "$vhost" ] || [ -L "$vhost" ]; then
+        cp -a "$vhost" "$backup/vhost" || { rm -f "$candidate"; rm -rf "$backup"; return 1; }
+    fi
+    if [ -e "$link" ] || [ -L "$link" ]; then
+        cp -a "$link" "$backup/enabled" || { rm -f "$candidate"; rm -rf "$backup"; return 1; }
+    fi
+    if ! mv -f "$candidate" "$vhost" || ! ln -sfn "$vhost" "$link"; then
+        echo -e "${RED}Could not install the site's Nginx configuration.${NC}"
+        status=1
+    elif ! nginx -t 2>&1; then
+        echo -e "${RED}Nginx configuration test failed. Restoring the previous site configuration.${NC}"
+        status=1
+    else
+        action=reload
+        if ! systemctl is-active --quiet nginx; then action=start; fi
+        if ! systemctl "$action" nginx; then
+            echo -e "${RED}Nginx ${action} failed. Restoring the previous site configuration.${NC}"
+            pushit_nginx_diagnostics
+            status=1
+        fi
+    fi
+    if [ "$status" -ne 0 ]; then
+        # Restore both the original vhost and the enabled/disabled state.
+        if ! rm -f "$vhost" "$link"; then
+            echo -e "${RED}Rollback failed. Previous configurations are in '${backup}'.${NC}"
+            return 1
+        fi
+        if [ -e "$backup/vhost" ] || [ -L "$backup/vhost" ]; then
+            mv "$backup/vhost" "$vhost" || { echo "Restore manually from $backup"; return 1; }
+        fi
+        if [ -e "$backup/enabled" ] || [ -L "$backup/enabled" ]; then
+            mv "$backup/enabled" "$link" || { echo "Restore manually from $backup"; return 1; }
+        fi
+        rm -f "$candidate"
+        rm -rf "$backup"
+        # A service action may have failed after partially applying a config.
+        if [ "${action:-}" = reload ] && nginx -t >/dev/null 2>&1; then
+            systemctl reload nginx || echo -e "${YELLOW}Previous files restored, but reload still failed. Check nginx.service.${NC}"
+        fi
+        echo -e "${YELLOW}Site files were kept. Run 'sudo nginx -t' and fix any remaining server configuration errors.${NC}"
+        return 1
+    fi
+    rm -rf "$backup"
+    return 0
+}
 
 deploy_site() {
     # A previous action (e.g. Delete Site) may have removed the directory the
@@ -1242,76 +1378,18 @@ pm.start_servers = 2
 pm.min_spare_servers = 1
 pm.max_spare_servers = 3
 EOF
-    systemctl restart "php${PHP_VERSION}-fpm"
-    
-    # Nginx Vhost
-    mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
-    VHOST_CONF="/etc/nginx/sites-available/$DOMAIN"
-    _DOTCOUNT=$(echo "$DOMAIN" | tr -cd '.' | wc -c)
-    if [ "$_DOTCOUNT" -ge 2 ]; then
-        # Already a subdomain — no need to add www.
-        SN_LINE="server_name ${DOMAIN};"
-    else
-        SN_LINE="server_name ${DOMAIN} www.${DOMAIN};"
+    if ! systemctl restart "php${PHP_VERSION}-fpm"; then
+        echo -e "${RED}PHP-FPM restart failed. Site activation stopped.${NC}"
+        systemctl status "php${PHP_VERSION}-fpm" --no-pager -l || true
+        return 1
     fi
-    cat <<EOF > "$VHOST_CONF"
-server {
-    listen 80;
-    $SN_LINE
-    root /home/$USERNAME/$DOMAIN/public;
 
-    add_header X-Frame-Options "SAMEORIGIN";
-    add_header X-XSS-Protection "1; mode=block";
-    add_header X-Content-Type-Options "nosniff";
-
-    index index.html index.htm index.php;
-
-    charset utf-8;
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-
-    location = /favicon.ico { access_log off; log_not_found off; }
-    location = /robots.txt  { access_log off; log_not_found off; }
-
-    error_page 404 /index.php;
-
-    location ~ \.php$ {
-        fastcgi_pass unix:/var/run/php/php${PHP_VERSION}-fpm-$USERNAME.sock;
-        fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
-        include fastcgi_params;
-    }
-
-    location ~ /\.(?!well-known).* {
-        deny all;
-    }
-
-    # -- Pushit AI endpoints --
-    location ^~ /api/ai.php {
-        fastcgi_pass unix:/var/run/php/php${PHP_VERSION}-fpm-$USERNAME.sock;
-        fastcgi_param SCRIPT_FILENAME \\${realpath_root}\\${fastcgi_script_name};
-        include fastcgi_params;
-    }
-    location = /api/ai-proxy {
-        proxy_pass http://127.0.0.1:8765;
-        proxy_set_header Host \\${host};
-        proxy_set_header X-Real-IP \\${remote_addr};
-        proxy_set_header X-Project-Path /home/$USERNAME/$DOMAIN;
-        proxy_read_timeout 90s;
-    }
-}
-EOF
-    ln -sf "$VHOST_CONF" "/etc/nginx/sites-enabled/$DOMAIN"
-    systemctl reload nginx
-    
+    if ! pushit_activate_site_vhost "$DOMAIN" "$USERNAME"; then
+        echo -e "${RED}Application files are in ${DEPLOY_DIR}, but Nginx activation failed. Fix the reported error before retrying.${NC}"
+        return 1
+    fi
     echo -e "\e[32mSite $DOMAIN deployed. Root: /home/$USERNAME/$DOMAIN\e[0m"
 
-    # --- AI Agent (optional) ---
-    read -r -p "Install AI Agent for this site? (y/N): " INSTALL_AI
-    if [[ "$INSTALL_AI" =~ ^[Yy]$ ]]; then
-        ai_install_for_project "/home/$USERNAME/$DOMAIN" "$DOMAIN" "$USERNAME"
-    fi
 }
 
 
@@ -1636,7 +1714,7 @@ pushit_user_reload_services() {
 
 delete_server_user() {
     local username confirmation file stage index=0 status=0 version enabled
-    local nginx_changed=0 supervisor_changed=0 ssh_changed=0 ai_was_active=0 site_snapshot service_snapshot
+    local nginx_changed=0 supervisor_changed=0 ssh_changed=0 site_snapshot service_snapshot
     local ssh_config="${PUSHIT_USERS_SSH_CONFIG:-/etc/ssh/sshd_config}"
     local php_dir="${PUSHIT_USERS_PHP_DIR:-/etc/php}"
     local supervisor_dir="${PUSHIT_USERS_SUPERVISOR_DIR:-/etc/supervisor/conf.d}"
@@ -1730,11 +1808,7 @@ delete_server_user() {
         pushit_user_reload_services "$nginx_changed" "$supervisor_changed" "$ssh_changed" ${versions[@]+"${versions[@]}"} || status=1
     fi
     if [ "$status" -eq 0 ]; then
-        # Stop the per-user agent and remaining processes before removing the account.
-        if systemctl is-active --quiet "pushit-ai@$username" 2>/dev/null; then
-            ai_was_active=1
-            systemctl stop "pushit-ai@$username" || status=1
-        fi
+        # Stop remaining processes before removing the account.
         if pgrep -u "$username" >/dev/null 2>&1; then
             pkill -TERM -u "$username" 2>/dev/null || status=1
             sleep 1
@@ -1758,12 +1832,10 @@ delete_server_user() {
                 pushit_user_reload_services "$nginx_changed" "$supervisor_changed" "$ssh_changed" ${versions[@]+"${versions[@]}"} || true
             fi
             if [ -s "$stage/crontab" ]; then crontab -u "$username" "$stage/crontab" || true; fi
-            if [ "$ai_was_active" -eq 1 ]; then systemctl start "pushit-ai@$username" || true; fi
         fi
         echo -e "${RED}Deletion failed or was incomplete. Config backups are in '${stage}'; verify the account/home before retrying.${NC}"
         return 1
     fi
-    systemctl disable "pushit-ai@$username" 2>/dev/null || true
     rm -rf "$stage"
     echo -e "${GREEN}Server user '${username}', its sites and home directory removed.${NC}"
 }
@@ -1795,8 +1867,7 @@ manage_sites() {
         echo "3) Add Domain to Site"
         echo "4) Remove Domain from Site"
         echo "5) List Sites & Domains"
-        echo "6) Manage Site AI Agents"
-        echo "7) Manage Server Users"
+        echo "6) Manage Server Users"
         echo "0) Back"
         read -r -p "Choice: " SITE_CHOICE
         case $SITE_CHOICE in
@@ -1805,8 +1876,7 @@ manage_sites() {
             3) add_site_domain ;;
             4) remove_site_domain ;;
             5) list_site_domains ;;
-            6) manage_project_ai ;;
-            7) manage_server_users ;;
+            6) manage_server_users ;;
             0) break ;;
             *) echo -e "\e[31mInvalid choice.\e[0m" ;;
         esac
@@ -1935,57 +2005,424 @@ install_ssl() {
 }
 
 manage_firewall() {
-    echo "1) Enable UFW & allow SSH/HTTP/HTTPS"
-    echo "2) Allow port"
-    echo "3) Deny port"
-    read -r -p "Select: " FW_OPT
-    case $FW_OPT in
-        1) ufw allow OpenSSH; ufw allow 'Nginx Full'; ufw --force enable ;;
-        2) read -r -p "Port: " PORT; ufw allow "$PORT" ;;
-        3) read -r -p "Port: " PORT; ufw deny "$PORT" ;;
+    local fw_opt fw_input fw_rule fw_status fw_number fw_confirm fw_source fw_port fw_protocol ssh_ports ssh_port
+    if ! command -v ufw >/dev/null 2>&1; then
+        echo -e "${RED}UFW is not installed. Run Install Full Stack first.${NC}"
+        return 1
+    fi
+    echo "1) Enable UFW with SSH, HTTP and HTTPS allowed; deny other inbound traffic"
+    echo "2) Allow a port (PORT/tcp or PORT/udp; optional source IP/CIDR)"
+    echo "3) Deny a port (inserts a blocking rule before existing rules)"
+    echo "4) Show UFW status and numbered rules"
+    echo "5) Remove a rule by number"
+    echo "0) Back"
+    read -r -p "Select: " fw_opt
+    case "$fw_opt" in
+        1) pushit_ufw_apply_baseline ;;
+        2|3)
+            read -r -p "Port[/tcp|/udp]: " fw_input
+            fw_rule=$(pushit_ufw_validate_rule "$fw_input") || {
+                echo -e "${RED}Enter a port from 1 to 65535, optionally followed by /tcp or /udp.${NC}"
+                return 1
+            }
+            read -r -p "Limit to source IP/CIDR (Enter = any address): " fw_input
+            fw_source=""
+            if [ -n "$fw_input" ]; then
+                fw_source=$(pushit_ufw_validate_source "$fw_input") || {
+                    echo -e "${RED}Enter a valid IPv4/IPv6 address or CIDR network.${NC}"
+                    return 1
+                }
+            fi
+            fw_port="${fw_rule%/*}"
+            fw_protocol="${fw_rule#*/}"
+            ssh_ports=""
+            if command -v sshd >/dev/null 2>&1; then ssh_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}'); fi
+            if [ "$fw_opt" = 2 ]; then
+                if [ -n "$fw_source" ] && [[ "$fw_rule" == */tcp && " $ssh_ports " == *" ${fw_port} "* ]]; then
+                    echo -e "${RED}This will restrict SSH to ${fw_source}; a wrong address may lock you out.${NC}"
+                    read -r -p "Type RESTRICT to continue: " fw_confirm
+                    [ "$fw_confirm" = RESTRICT ] || return 1
+                fi
+                ufw --force delete deny "$fw_rule" >/dev/null 2>&1 || true
+                if [ -n "$fw_source" ]; then
+                    ufw --force delete allow from "$fw_source" to any port "$fw_port" proto "$fw_protocol" >/dev/null 2>&1 || true
+                    ufw insert 1 deny "$fw_rule" || return 1
+                    ufw insert 1 allow from "$fw_source" to any port "$fw_port" proto "$fw_protocol"
+                else
+                    ufw insert 1 allow "$fw_rule"
+                fi
+            else
+                if [[ "$fw_rule" == */tcp && " $ssh_ports " == *" ${fw_rule%/*} "* ]]; then
+                    echo -e "${RED}This is an active SSH port. Closing it may disconnect you.${NC}"
+                    read -r -p "Type CLOSE to continue: " fw_input
+                    [ "$fw_input" = CLOSE ] || return 1
+                fi
+                if [ -n "$fw_source" ]; then
+                    ufw insert 1 deny from "$fw_source" to any port "$fw_port" proto "$fw_protocol"
+                elif ! ufw status 2>/dev/null | awk -v rule="$fw_rule" '$1 == rule && $2 == "DENY" {found=1} END {exit !found}'; then
+                    ufw insert 1 deny "$fw_rule"
+                fi
+            fi
+            ;;
+        4) ufw status verbose; ufw status numbered ;;
+        5)
+            fw_status=$(ufw status numbered)
+            printf '%s\n' "$fw_status"
+            read -r -p "Rule number to remove: " fw_number
+            if ! [[ "$fw_number" =~ ^[0-9]+$ ]] || [ "$fw_number" -lt 1 ]; then
+                echo -e "${RED}Enter a valid rule number.${NC}"
+                return 1
+            fi
+            fw_rule=$(printf '%s\n' "$fw_status" | awk -v number="$fw_number" '($1 == "[" && $2 == number "]") || $1 == "[" number "]" { $1=""; if ($2 == number "]") $2=""; sub(/^[[:space:]]+/, ""); print; exit }')
+            if [ -z "$fw_rule" ]; then
+                echo -e "${RED}No rule numbered ${fw_number} was found.${NC}"
+                return 1
+            fi
+            if command -v sshd >/dev/null 2>&1; then
+                ssh_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}')
+                for ssh_port in $ssh_ports; do
+                    if [[ "$fw_rule" == *"${ssh_port}/tcp"* || "$fw_rule" == *OpenSSH* ]]; then
+                        echo -e "${RED}This rule may allow SSH. Removing it may disconnect you.${NC}"
+                        read -r -p "Type CLOSE to continue: " fw_confirm
+                        [ "$fw_confirm" = CLOSE ] || return 1
+                        break
+                    fi
+                done
+            fi
+            read -r -p "Type DELETE to remove rule ${fw_number}: " fw_confirm
+            [ "$fw_confirm" = DELETE ] || return 1
+            ufw --force delete "$fw_number"
+            ;;
+        0) return 0 ;;
+        *) echo -e "${RED}Invalid choice.${NC}"; return 1 ;;
     esac
 }
 
-harden_server() {
-    # SSH Hardening (Disable root login, password auth)
-    echo -e "${YELLOW}This will disable root SSH login and password authentication.${NC}"
-    echo -e "${YELLOW}Make sure you have a working SSH public key on this server, otherwise you will be locked out!${NC}"
+pushit_ssh_reload() {
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null
+}
 
-    # Check that at least one user (root or /home/*) has an authorized key
-    HAS_KEY=0
-    for SSH_DIR in /root /home/*; do
-        if [ -s "$SSH_DIR/.ssh/authorized_keys" ]; then
-            HAS_KEY=1
-            echo -e "SSH key found for: $(basename "$SSH_DIR")"
-        fi
+# Collect active Include files and build candidates without touching SSH yet.
+pushit_ssh_prepare_configs() {
+    python3 - "$1" "$2" <<'PYSSH'
+import glob, json, os, pathlib, re, shlex, shutil, sys
+main, backup = pathlib.Path(sys.argv[1]).resolve(), pathlib.Path(sys.argv[2])
+policy = {
+    'permitrootlogin': ('PermitRootLogin', 'no'),
+    'passwordauthentication': ('PasswordAuthentication', 'no'),
+    'kbdinteractiveauthentication': ('KbdInteractiveAuthentication', 'no'),
+    'challengeresponseauthentication': ('ChallengeResponseAuthentication', 'no'),
+    'pubkeyauthentication': ('PubkeyAuthentication', 'yes'),
+    'authenticationmethods': ('AuthenticationMethods', 'publickey'),
+}
+seen, entries = set(), []
+def visit(path):
+    path = pathlib.Path(path).resolve()
+    if path in seen:
+        return
+    seen.add(path)
+    text = path.read_text()
+    index = str(len(entries))
+    shutil.copy2(str(path), str(backup / (index + '.original')))
+    entries.append({'path': str(path), 'index': index})
+    if path == main:
+        text = re.sub(r'\A# BEGIN Pushit SSH hardening\n.*?# END Pushit SSH hardening\n\n?', '', text, count=1, flags=re.S)
+    lines = []
+    for line in text.splitlines(keepends=True):
+        normalized = re.sub(r'^(\s*[A-Za-z][A-Za-z0-9]*)\s*=\s*', r'\1 ', line)
+        fields = shlex.split(normalized, comments=True)
+        if fields and fields[0].lower() == 'include':
+            for pattern in fields[1:]:
+                if '%' in pattern or '$' in pattern or '~' in pattern:
+                    raise ValueError('Unsupported dynamic SSH Include: ' + pattern)
+                if not os.path.isabs(pattern):
+                    pattern = '/etc/ssh/' + pattern
+                for child in sorted(glob.glob(pattern)):
+                    visit(child)
+        if fields and fields[0].lower() in policy:
+            directive, value = policy[fields[0].lower()]
+            indent = line[:len(line) - len(line.lstrip())]
+            line = indent + directive + ' ' + value + '\n'
+        lines.append(line)
+    candidate = ''.join(lines)
+    if path == main:
+        candidate = '# BEGIN Pushit SSH hardening\n' + ''.join(k + ' ' + v + '\n' for k, v in policy.values()) + '# END Pushit SSH hardening\n\n' + candidate
+    (backup / (index + '.candidate')).write_text(candidate)
+try:
+    visit(main)
+    (backup / 'manifest.json').write_text(json.dumps(entries))
+except Exception as exc:
+    print('Cannot prepare SSH configuration: ' + str(exc), file=sys.stderr)
+    sys.exit(1)
+PYSSH
+}
+
+pushit_ssh_copy_configs() {
+    python3 - "$1" "$2" <<'PYSSH'
+import json, pathlib, shutil, sys
+backup, kind = pathlib.Path(sys.argv[1]), sys.argv[2]
+for entry in json.loads((backup / 'manifest.json').read_text()):
+    # Copy bytes into the existing file to preserve its permissions/ownership.
+    shutil.copyfile(str(backup / (entry['index'] + '.' + kind)), entry['path'])
+PYSSH
+}
+
+pushit_ssh_write_rollback() {
+    cat > "$1/rollback.sh" <<'ROLLBACK'
+#!/bin/bash
+set -eu
+backup="$1"
+sshd_bin="$2"
+config="$3"
+exec 9> "$backup/lock"
+flock -x 9
+[ -f "$backup/pending" ] || exit 0
+python3 - "$backup" <<'PYSSH'
+import json, pathlib, shutil, sys
+backup = pathlib.Path(sys.argv[1])
+for entry in json.loads((backup / 'manifest.json').read_text()):
+    shutil.copyfile(str(backup / (entry['index'] + '.original')), entry['path'])
+PYSSH
+"$sshd_bin" -t -f "$config"
+systemctl reload ssh || systemctl reload sshd
+rm -f "$backup/pending"
+touch "$backup/restored"
+ROLLBACK
+    chmod 700 "$1/rollback.sh"
+}
+
+pushit_ssh_confirm_hardening() {
+    local backup="$1"
+    # Serialize confirmation with the independently running rollback service.
+    (
+        flock -x 9 || exit 1
+        [ -f "$backup/pending" ] || exit 1
+        touch "$backup/confirmed" || exit 1
+        rm -f "$backup/pending"
+    ) 9> "$backup/lock"
+}
+
+pushit_ssh_verify_policy() {
+    local sshd_bin="$1" config="$2" admin="$3" username output setting
+    local address="${SSH_CONNECTION:-}"
+    address="${address%% *}"
+    address="${address:-127.0.0.1}"
+    for username in root "$admin"; do
+        output=$("$sshd_bin" -T -f "$config" -C "user=$username,addr=$address,host=$address") || return 1
+        for setting in 'permitrootlogin no' 'passwordauthentication no' 'kbdinteractiveauthentication no' 'pubkeyauthentication yes' 'authenticationmethods publickey'; do
+            if ! printf '%s\n' "$output" | grep -Fxq "$setting"; then
+                echo -e "${RED}Effective SSH policy for '${username}' did not match '${setting}'.${NC}"
+                return 1
+            fi
+        done
     done
-    if [ "$HAS_KEY" -eq 0 ]; then
-        echo -e "${RED}No authorized SSH key found for any user. Aborting to prevent lockout.${NC}"
-        echo -e "${RED}Add a key first (deploy a site with option 4 and choose 'SSH Public Key').${NC}"
+}
+
+# The private key is exported once and removed before waiting for confirmation.
+pushit_ssh_generate_client_key() (
+    local public_file="$1" client_name="$2" admin="$3" key_dir saved
+    umask 077
+    key_dir=$(mktemp -d "${TMPDIR:-/tmp}/pushit-ssh-key.XXXXXX") || return 1
+    trap 'rm -rf -- "$key_dir"' EXIT
+    trap 'exit 1' HUP INT TERM
+    ssh-keygen -q -t ed25519 -N '' -C "$admin@pushit" -f "$key_dir/private_key" || return 1
+    echo ''
+    echo 'New SSH key pair. Keep the PRIVATE key secret; only the PUBLIC key is installed on the server.'
+    echo 'On your own Mac/Linux computer, copy and run this entire block to save BOTH files:'
+    echo '--- BEGIN LOCAL SAVE COMMANDS ---'
+    cat <<'KEYSAVE'
+(
+    umask 077
+    mkdir -p "$HOME/.ssh" || exit 1
+    chmod 700 "$HOME/.ssh" || exit 1
+    set -C # Refuse to overwrite an existing key file.
+KEYSAVE
+    printf '    cat > "$HOME/.ssh/%s" <<\x27PUSHIT_PRIVATE_KEY\x27 || exit 1\n' "$client_name"
+    cat "$key_dir/private_key" || return 1
+    echo 'PUSHIT_PRIVATE_KEY'
+    printf '    cat > "$HOME/.ssh/%s.pub" <<\x27PUSHIT_PUBLIC_KEY\x27 || exit 1\n' "$client_name"
+    cat "$key_dir/private_key.pub" || return 1
+    echo 'PUSHIT_PUBLIC_KEY'
+    echo ')'
+    echo '--- END LOCAL SAVE COMMANDS ---'
+    # Do not retain a private key in the administrator's home or config backups.
+    rm -f -- "$key_dir/private_key" || return 1
+    printf 'Windows: save the PRIVATE key block as %s and the PUBLIC key line as %s.pub in your local .ssh directory (plain text, no BOM).\n' "$client_name" "$client_name"
+    echo 'The generated private key has no passphrase. You can add one on your own computer:'
+    printf '  ssh-keygen -p -f "$HOME/.ssh/%s"\n' "$client_name"
+    read -r -p 'After saving BOTH files on your computer, type SAVED (anything else cancels): ' saved || return 1
+    if [ "$saved" != SAVED ]; then
+        echo 'Cancelled. SSH policy was not changed.'
         return 1
     fi
+    cp "$key_dir/private_key.pub" "$public_file"
+)
 
-    # Backup before editing
-    SSH_BACKUP="/etc/ssh/sshd_config.bak.$(date +%Y%m%d%H%M%S)"
-    cp /etc/ssh/sshd_config "$SSH_BACKUP"
-
-    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-
-    # Validate config before applying (if the sshd binary is available)
-    SSHD_BIN=$(command -v sshd 2>/dev/null || true)
-    if [ -n "$SSHD_BIN" ] && ! "$SSHD_BIN" -t 2>/dev/null; then
-        cp "$SSH_BACKUP" /etc/ssh/sshd_config
-        echo -e "${RED}sshd config validation failed. Changes were reverted.${NC}"
+pushit_harden_server_wizard() {
+    local config="${PUSHIT_SSH_CONFIG:-/etc/ssh/sshd_config}"
+    local backup_root="${PUSHIT_SSH_BACKUP_DIR:-/var/backups/pushit/ssh}"
+    local root_keys="${PUSHIT_SSH_ROOT_KEYS:-/root/.ssh/authorized_keys}"
+    local home_root="${PUSHIT_SSH_HOME_ROOT:-/home}"
+    local admin default_admin record home group password repeat key_choice public_key key_file password_status
+    local sshd_bin backup unit confirmation port server_ip command_name pending generated_key_name='' missing=0 created=0
+    echo -e "\n--- Guided SSH Hardening ---"
+    echo 'This wizard prepares a sudo administrator and public-key login before disabling root/password SSH.'
+    for command_name in python3 ssh-keygen sshd sudo useradd chpasswd passwd flock systemd-run; do
+        command -v "$command_name" >/dev/null 2>&1 || missing=1
+    done
+    if [ "$missing" -eq 1 ]; then
+        echo -e "${YELLOW}Installing required SSH administration tools...${NC}"
+        apt-get update && apt-get install -y openssh-server openssh-client sudo python3 util-linux passwd || return 1
+    fi
+    sshd_bin=$(command -v sshd) || return 1
+    "$sshd_bin" -t -f "$config" || return 1
+    # Finish recovery from an interrupted earlier run before preparing new changes.
+    for pending in "$backup_root"/hardening.*/pending; do
+        [ -f "$pending" ] || continue
+        backup=${pending%/pending}
+        /bin/bash "$backup/rollback.sh" "$backup" "$sshd_bin" "$config" || return 1
+    done
+    default_admin=pushit-admin
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then default_admin="$SUDO_USER"; fi
+    while true; do
+        read -r -p "Administrator username [${default_admin}] (0 to cancel): " admin || return 1
+        admin="${admin:-$default_admin}"
+        [ "$admin" != 0 ] || return 0
+        if ! [[ "$admin" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || [ "$admin" = root ]; then
+            echo -e "${RED}Choose a valid non-root administrator username.${NC}"
+            continue
+        fi
+        if record=$(getent passwd "$admin"); then
+            if [ "$(printf '%s\n' "$record" | cut -d: -f3)" = 0 ]; then
+                echo -e "${RED}Accounts with UID 0 cannot be the recovery administrator.${NC}"
+                continue
+            fi
+            if ! id -nG "$admin" | tr ' ' '\n' | grep -Fxq sudo; then
+                echo -e "${RED}That account is not an administrator. Choose a sudo user or a new dedicated account.${NC}"
+                continue
+            fi
+        else
+            if ! useradd -m -s /bin/bash -G sudo "$admin"; then return 1; fi
+            created=1
+            record=$(getent passwd "$admin") || return 1
+            echo -e "${GREEN}Administrator '${admin}' created.${NC}"
+        fi
+        break
+    done
+    home=$(printf '%s\n' "$record" | cut -d: -f6)
+    group=$(id -gn "$admin") || return 1
+    if [ "$home" != "$home_root/$admin" ] || [ -L "$home" ] || [ -L "$home/.ssh" ] || [ -L "$home/.ssh/authorized_keys" ]; then
+        echo -e "${RED}The administrator needs a regular /home/${admin} directory and SSH key files.${NC}"
         return 1
     fi
+    password_status=$(passwd -S "$admin" 2>/dev/null | awk '{print $2}') || password_status=''
+    if [ "$created" -eq 1 ] || [ "$password_status" = L ] || [ "$password_status" = NP ]; then
+        while true; do
+            read -r -sp 'Set administrator password (used for sudo): ' password || return 1
+            echo ''
+            read -r -sp 'Repeat administrator password: ' repeat || return 1
+            echo ''
+            if [ -z "$password" ] || [ "$password" != "$repeat" ]; then
+                echo -e "${RED}Passwords must be nonempty and match.${NC}"
+                continue
+            fi
+            if ! (set -o pipefail; printf '%s:%s\n' "$admin" "$password" | chpasswd); then return 1; fi
+            unset password repeat
+            break
+        done
+    fi
+    mkdir -p "$backup_root" || return 1
+    chmod 700 "$backup_root" || return 1
+    backup=$(mktemp -d "$backup_root/hardening.XXXXXX") || return 1
+    key_file="$backup/selected_keys"
+    while true; do
+        echo 'Provide your own public key or let Pushit generate a new key pair:'
+        echo "1) Use this administrator's existing authorized keys"
+        echo '2) Copy existing root authorized keys to the administrator'
+        echo "3) Paste your computer's SSH public key here"
+        echo '4) Generate a new key pair and show BOTH keys for saving on your computer'
+        echo '0) Cancel (SSH policy remains unchanged)'
+        read -r -p 'Key source [3]: ' key_choice || return 1
+        case "${key_choice:-3}" in
+            1) [ -f "$home/.ssh/authorized_keys" ] && cp "$home/.ssh/authorized_keys" "$key_file" || { echo 'No keys found for this administrator.'; continue; } ;;
+            2) [ -f "$root_keys" ] && cp "$root_keys" "$key_file" || { echo 'No root authorized keys found. Choose option 3.'; continue; } ;;
+            3)
+                read -r -p 'Paste PUBLIC key (ssh-ed25519/ssh-rsa/...; never a private key): ' public_key || return 1
+                printf '%s\n' "$public_key" > "$key_file"
+                ;;
+            4)
+                generated_key_name="pushit_${admin}_${backup##*.}"
+                pushit_ssh_generate_client_key "$key_file" "$generated_key_name" "$admin" || return 1
+                ;;
+            0) echo 'Cancelled. SSH policy was not changed.'; return 0 ;;
+            *) echo 'Invalid choice.'; continue ;;
+        esac
+        if ssh-keygen -lf "$key_file" 2>/dev/null; then break; fi
+        echo -e "${RED}Invalid public key. Paste the complete public-key line or choose another source.${NC}"
+    done
+    mkdir -p "$home/.ssh" || return 1
+    chmod 700 "$home/.ssh" || return 1
+    if [ -f "$home/.ssh/authorized_keys" ]; then
+        cp -p "$home/.ssh/authorized_keys" "$backup/authorized_keys.before" || return 1
+    fi
+    # Keep existing keys and append validated input without replacing access.
+    touch "$home/.ssh/authorized_keys" || return 1
+    chmod 600 "$home/.ssh/authorized_keys" || return 1
+    if [ "$key_choice" != 1 ]; then
+        { printf '\n'; cat "$key_file"; } >> "$home/.ssh/authorized_keys" || return 1
+    fi
+    chown "$admin:$group" "$home/.ssh" "$home/.ssh/authorized_keys" || return 1
+    chmod go-w "$home" || return 1
+    if ! pushit_ssh_prepare_configs "$config" "$backup" || ! pushit_ssh_write_rollback "$backup"; then return 1; fi
+    touch "$backup/pending" || return 1
+    unit="pushit-ssh-rollback-${backup##*/}"
+    if ! systemd-run --unit="$unit" --on-active=5m /bin/bash "$backup/rollback.sh" "$backup" "$sshd_bin" "$config"; then
+        rm -f "$backup/pending"
+        echo -e "${RED}Could not arm automatic rollback. SSH policy was not changed.${NC}"
+        return 1
+    fi
+    if ! pushit_ssh_copy_configs "$backup" candidate || ! "$sshd_bin" -t -f "$config" || ! pushit_ssh_verify_policy "$sshd_bin" "$config" "$admin" || ! pushit_ssh_reload; then
+        echo -e "${RED}Could not activate hardening; restoring the previous SSH configuration.${NC}"
+        /bin/bash "$backup/rollback.sh" "$backup" "$sshd_bin" "$config" || echo "Automatic restore failed. Backups: $backup"
+        return 1
+    fi
+    port=$(pushit_ssh_port)
+    server_ip=$(printf '%s\n' "${SSH_CONNECTION:-}" | awk '{print $3}')
+    if [ -z "$server_ip" ]; then server_ip=$(hostname -I 2>/dev/null | awk '{print $1}') || server_ip=SERVER_IP; fi
+    echo -e "${YELLOW}Hardening is temporary until you confirm. Automatic rollback in 5 minutes.${NC}"
+    echo 'Keep this terminal open. In a NEW terminal on your computer, run:'
+    if [ -n "$generated_key_name" ]; then
+        printf '  ssh -i "$HOME/.ssh/%s" -o IdentitiesOnly=yes -p %s -o PreferredAuthentications=publickey -o PasswordAuthentication=no %s@%s\n' "$generated_key_name" "$port" "$admin" "${server_ip:-SERVER_IP}"
+    else
+        printf '  ssh -p %s -o PreferredAuthentications=publickey -o PasswordAuthentication=no %s@%s\n' "$port" "$admin" "${server_ip:-SERVER_IP}"
+    fi
+    echo 'After connecting, run: sudo -v'
+    # Checking real login requires possession of the private key on the client.
+    read -r -t 240 -p 'After BOTH login and sudo succeed, type KEEP to confirm (anything else restores SSH): ' confirmation || confirmation=''
+    if [ "$confirmation" = KEEP ] && pushit_ssh_confirm_hardening "$backup"; then
+        systemctl stop "$unit.timer" 2>/dev/null || true
+        echo -e "${GREEN}SSH hardened: administrator '${admin}', public-key login, root/password SSH disabled.${NC}"
+        echo "Configuration backups: $backup"
+    else
+        /bin/bash "$backup/rollback.sh" "$backup" "$sshd_bin" "$config" || echo "Check rollback service: $unit.service (backups: $backup)"
+        echo -e "${YELLOW}Hardening was not confirmed. Previous SSH configuration restored, or restoration is pending in $unit.service. Administrator/key setup was kept.${NC}"
+        return 1
+    fi
+}
 
-    # Service name differs: 'ssh' on modern Ubuntu, 'sshd' on older releases
-    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null \
-        || systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
-
-    echo -e "${GREEN}Server hardened. Backup saved to: $SSH_BACKUP${NC}"
-    echo -e "${YELLOW}IMPORTANT: Keep this session open and test a new SSH login before closing it!${NC}"
+harden_server() {
+    local lock="${PUSHIT_SSH_LOCK_FILE:-/etc/pushit/ssh-hardening.lock}"
+    if ! command -v flock >/dev/null 2>&1; then
+        apt-get update && apt-get install -y util-linux || return 1
+    fi
+    mkdir -p "$(dirname "$lock")" || return 1
+    (
+        if ! flock -n 8; then
+            echo -e "${YELLOW}Another SSH hardening wizard is already running.${NC}"
+            exit 1
+        fi
+        pushit_harden_server_wizard
+    ) 8> "$lock"
 }
 
 # pushit DB helper — validate mysql client + daemon before any DB action
@@ -2115,6 +2552,9 @@ pushit_db_publish_backup() {
     echo -e "  ${YELLOW}wget \"${dl_url}\"${NC}"
     echo -e "  Expires: ${expires_human}  |  Size: ${fsize}  |  File: $(basename "$DUMP_FILE")"
     echo -e "  ${RED}Link expires in 10 min — reusable until expiry.${NC}"
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+        echo -e "  ${YELLOW}Browser link needs ${PUSHIT_DL_PORT}/tcp open in menu 5. Close it after downloading; SCP uses SSH and needs no extra port.${NC}"
+    fi
     echo ""
     SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
     _SSH_PORT=$(pushit_ssh_port)
@@ -2925,646 +3365,6 @@ _dns_test_dns() {
     echo ""; echo "--- ping -c1 $D ---"
     ping -c1 -W3 "$D" 2>&1 | head -n 10 || echo "(ping failed)"
 }
-# =========================================================================
-# AI Agent — Server & Project management
-# =========================================================================
-
-# JSON helpers (no jq dependency)
-_ai_json_get() {
-    local _f="$1" _k="$2"
-    grep -o "\"${_k}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$_f" 2>/dev/null \
-        | sed 's/.*:[[:space:]]*"\([^"]*\)"/\1/' | head -n1
-}
-_ai_json_get_bool() {
-    local _f="$1" _k="$2"
-    grep -o "\"${_k}\"[[:space:]]*:[[:space:]]*[a-z]*" "$_f" 2>/dev/null \
-        | sed -E 's/.*:[[:space:]]*//' | head -n1
-}
-_ai_json_set() {
-    local _f="$1" _k="$2" _v="$3"
-    mkdir -p "$(dirname "$_f")" 2>/dev/null || true
-    if [ -f "$_f" ] && grep -q "\"${_k}\"" "$_f" 2>/dev/null; then
-        local tmpf
-        tmpf=$(mktemp)
-        while IFS= read -r line; do
-            if echo "$line" | grep -q "\"${_k}\"[[:space:]]*:"; then
-                printf '    "%s": "%s",\n' "$_k" "$_v"
-            else
-                echo "$line"
-            fi
-        done < "$_f" > "$tmpf"
-        mv "$tmpf" "$_f"
-    else
-        local tmpf
-        tmpf=$(mktemp)
-        local total
-        total=$(wc -l < "$_f")
-        while IFS= read -r line; do
-            total=$((total - 1))
-            if [ $total -eq 0 ] && echo "$line" | grep -q '^}'; then
-                printf '    "%s": "%s",\n' "$_k" "$_v"
-                echo "$line"
-            else
-                echo "$line"
-            fi
-        done < "$_f" > "$tmpf"
-        mv "$tmpf" "$_f"
-    fi
-}
-_ai_mask_key() {
-    local k="$1"
-    if [ ${#k} -le 6 ]; then
-        echo "${k:0:2}****"
-    else
-        local masked
-        masked=$(printf '%*s' $((${#k}-6)) '' | tr ' ' '*')
-        echo "${k:0:4}${masked}${k: -2}"
-    fi
-}
-
-_ai_write_conf() {
-    local _conf="$1" _provider="$2" _baseurl="$3" _apikey="$4" _model="$5"
-    mkdir -p "$(dirname "$_conf")" 2>/dev/null || true
-    cat > "$_conf" <<JSONEOF
-{
-    "enabled": true,
-    "provider": "${_provider}",
-    "api_base_url": "${_baseurl}",
-    "api_key": "${_apikey}",
-    "model": "${_model}",
-    "scope": "${SCOPE:-project}",
-    "version": "${PUSHIT_VERSION}",
-    "permissions": {
-        "read_files": false,
-        "write_files": false,
-        "execute_commands": false,
-        "git": false,
-        "database_read": false,
-        "database_write": false,
-        "manage_services": false,
-        "manage_nginx": false,
-        "manage_ssl": false
-    },
-    "installed": false,
-    "running": false,
-    "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-    "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-JSONEOF
-    chmod 600 "$_conf"
-}
-_ai_conf_get() {
-    local _conf="$1" _key="$2" _default="${3:-}"
-    if [ -f "$_conf" ]; then
-        local val
-        val=$(_ai_json_get "$_conf" "$_key")
-        echo "${val:-$_default}"
-    else
-        echo "$_default"
-    fi
-}
-_ai_bin_exists() {
-    [ -x "$PUSHIT_AI_BIN" ]
-}
-
-# ── Install AI Agent binary & systemd units ─────────────────────────────
-install_ai_agent() {
-    local SRC_AGENT="$PUSHIT_AI_DIR/pushit-ai-agent.py"
-    local SRC_PHP="$PUSHIT_AI_DIR/templates/ai.php"
-    # Copy agent script
-    if [ ! -f "$SRC_AGENT" ]; then
-        echo -e "${RED}Agent source not found at $SRC_AGENT.${NC}"
-        return 1
-    fi
-    install -m 0755 "$SRC_AGENT" "$PUSHIT_AI_BIN" 2>/dev/null || {
-        cp "$SRC_AGENT" "$PUSHIT_AI_BIN" && chmod +x "$PUSHIT_AI_BIN"
-    }
-    if [ -x "$PUSHIT_AI_BIN" ]; then
-        _ai_json_set "$PUSHIT_AI_SERVER_CONF" "installed" "true"
-        _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        echo -e "${GREEN}Agent binary installed at $PUSHIT_AI_BIN${NC}"
-    else
-        echo -e "${RED}Failed to install agent binary.${NC}"
-        return 1
-    fi
-    # Create systemd server service
-    if [ ! -f /etc/systemd/system/pushit-ai-server.service ]; then
-        cat > /etc/systemd/system/pushit-ai-server.service <<SVEOF
-[Unit]
-Description=Pushit AI Server Agent
-After=network.target
-[Service]
-Type=simple
-ExecStart=$PUSHIT_AI_BIN serve --port 8765
-WorkingDirectory=/root
-Restart=on-failure
-RestartSec=5
-StandardOutput=append:$PUSHIT_AI_LOG_DIR/server.log
-StandardError=append:$PUSHIT_AI_LOG_DIR/server.err.log
-[Install]
-WantedBy=multi-user.target
-SVEOF
-        systemctl daemon-reload
-        echo -e "${GREEN}systemd unit pushit-ai-server.service created.${NC}"
-    fi
-    # Create per-user systemd service template
-    if [ ! -f /etc/systemd/system/pushit-ai@.service ]; then
-        cat > /etc/systemd/system/pushit-ai@.service <<SVUEOF
-[Unit]
-Description=Pushit AI Agent for %i
-After=network.target
-[Service]
-Type=simple
-ExecStart=$PUSHIT_AI_BIN serve --port 876%i
-WorkingDirectory=/home/%i
-User=%i
-Group=%i
-Restart=on-failure
-RestartSec=5
-StandardOutput=append:/var/log/pushit-ai/%i.log
-StandardError=append:/var/log/pushit-ai/%i.err.log
-[Install]
-WantedBy=multi-user.target
-SVUEOF
-        systemctl daemon-reload
-        echo -e "${GREEN}systemd unit pushit-ai@.service template created.${NC}"
-    fi
-}
-
-# ── Deploy AI PHP endpoint to a project ─────────────────────────────────
-deploy_ai_php_endpoint() {
-    local project_path="$1" username="$2"
-    local SRC_PHP="$PUSHIT_AI_DIR/templates/ai.php"
-    local DEST_PHP="${project_path}/public/api/ai.php"
-    if [ ! -f "$SRC_PHP" ]; then
-        echo -e "${YELLOW}AI PHP endpoint template not found at $SRC_PHP. Skipping.${NC}"
-        return 0
-    fi
-    mkdir -p "$(dirname "$DEST_PHP")" 2>/dev/null || true
-    cp "$SRC_PHP" "$DEST_PHP"
-    chown -R "$username:$username" "$(dirname "$DEST_PHP")" 2>/dev/null || true
-    chmod 644 "$DEST_PHP"
-    echo -e "${GREEN}AI PHP endpoint deployed to $DEST_PHP${NC}"
-}
-
-ai_install_for_project() {
-    local project_path="$1" domain="$2" username="$3"
-    echo -e "
---- Installing AI Agent for $domain ---"
-    local proj_conf="${project_path}/.pushit/ai/config.json"
-    mkdir -p "$(dirname "$proj_conf")" 2>/dev/null || true
-    local srv_provider srv_model srv_baseurl srv_apikey
-    srv_provider=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "provider" "$PUSHIT_AI_DEFAULT_PROVIDER")
-    srv_model=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "model" "$PUSHIT_AI_DEFAULT_MODEL")
-    srv_baseurl=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "api_base_url" "")
-    srv_apikey=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "api_key" "")
-    read -r -p "Provider [$srv_provider]: " AI_PROVIDER
-    AI_PROVIDER=${AI_PROVIDER:-$srv_provider}
-    read -r -p "API Base URL [$srv_baseurl]: " AI_BASEURL
-    AI_BASEURL=${AI_BASEURL:-$srv_baseurl}
-    read -r -s -p "API Key [$(_ai_mask_key "$srv_apikey")]: " AI_APIKEY
-    echo
-    AI_APIKEY=${AI_APIKEY:-$srv_apikey}
-    if [ -z "$AI_APIKEY" ]; then
-        echo -e "${RED}API Key is required.${NC}"
-        return 1
-    fi
-    read -r -p "Model [$srv_model]: " AI_MODEL
-    AI_MODEL=${AI_MODEL:-$srv_model}
-    SCOPE="project"
-    _ai_write_conf "$proj_conf" "$AI_PROVIDER" "$AI_BASEURL" "$AI_APIKEY" "$AI_MODEL"
-    chown -R "$username:$username" "$(dirname "$proj_conf")" 2>/dev/null || true
-    if [ ! -f "$PUSHIT_AI_SERVER_CONF" ]; then
-        mkdir -p "$PUSHIT_AI_DIR" 2>/dev/null || true
-        SCOPE="server"
-        _ai_write_conf "$PUSHIT_AI_SERVER_CONF" "$AI_PROVIDER" "$AI_BASEURL" "$AI_APIKEY" "$AI_MODEL"
-        chmod 600 "$PUSHIT_AI_SERVER_CONF"
-    fi
-    mkdir -p "$PUSHIT_AI_LOG_DIR" 2>/dev/null || true
-    # Try to install agent binary if source is present
-    install_ai_agent 2>/dev/null || true
-    # Deploy PHP endpoint
-    deploy_ai_php_endpoint "$project_path" "$username"
-    echo -e "${GREEN}AI Agent setup complete for $domain.${NC}"
-    echo -e "${GREEN}  Config : $proj_conf${NC}"
-    echo -e "${GREEN}  Endpoint: ${project_path}/public/api/ai.php${NC}"
-}
-
-_ai_list_projects() {
-    local _found=0
-    for d in /home/*/; do
-        local _user="$(basename "$d")"
-        for sd in "$d"*/; do
-            local _domain="$(basename "$sd")"
-            local _conf="${sd}.pushit/ai/config.json"
-            [ -f "$_conf" ] || continue
-            _found=1
-            local _provider _model _inst _run
-            _provider=$(_ai_conf_get "$_conf" "provider" "-")
-            _model=$(_ai_conf_get "$_conf" "model" "-")
-            _inst=$(_ai_conf_get "$_conf" "installed" "false")
-            _run=$(_ai_conf_get "$_conf" "running" "false")
-            local _status=""
-            [ "$_inst" = "true" ] && _status+="installed "
-            [ "$_run" = "true" ] && _status+="running"
-            [ -z "$_status" ] && _status="configured only"
-            echo -e "  ${GREEN}$_domain${NC}  user=$_user  provider=$_provider  model=$_model  [$_status]"
-        done
-    done
-    [ $_found -eq 0 ] && echo "  (no project AI configs found)"
-}
-
-# ── Manage Project AI Agents (sub-menu from Sites menu) ─────────────────
-manage_project_ai() {
-    while true; do
-        echo -e "\n--- Project AI Agents ---"
-        echo "1) List all Project AI configs"
-        echo "2) Manage a Project AI"
-        echo "0) Back"
-        read -r -p "Choice: " PAI_CHOICE
-        case $PAI_CHOICE in
-            1)
-                echo -e "\n=== Project AI Status ==="
-                _ai_list_projects
-                ;;
-            2)
-                echo -e "\nAvailable sites with AI config:"
-                local _idx=0 _sites=()
-                for d in /home/*/; do
-                    local _user="$(basename "$d")"
-                    for sd in "$d"*/; do
-                        local _domain="$(basename "$sd")"
-                        local _conf="${sd}.pushit/ai/config.json"
-                        [ -f "$_conf" ] || continue
-                        _idx=$((_idx + 1))
-                        _sites+=("$_domain|$_user|$_conf")
-                        local _p _m
-                        _p=$(_ai_conf_get "$_conf" "provider" "-")
-                        _m=$(_ai_conf_get "$_conf" "model" "-")
-                        echo "  $_idx) $_domain  ($_user)  $_p / $_m"
-                    done
-                done
-                if [ $_idx -eq 0 ]; then
-                    echo -e "${YELLOW}No project AI configs found.${NC} Deploy a site first or install AI during creation."
-                    continue
-                fi
-                read -r -p "Select site number: " PAI_SEL
-                if ! [[ "$PAI_SEL" =~ ^[0-9]+$ ]] || [ "$PAI_SEL" -lt 1 ] || [ "$PAI_SEL" -gt "$_idx" ]; then
-                    echo -e "${RED}Invalid selection.${NC}"
-                    continue
-                fi
-                local _sel="${_sites[$((PAI_SEL - 1))]}"
-                local _p_domain="${_sel%%|*}"; _sel="${_sel#*|}"
-                local _p_user="${_sel%%|*}"; _sel="${_sel#*|}"
-                local _p_conf="$_sel"
-                _manage_single_project_ai "$_p_domain" "$_p_user" "$_p_conf"
-                ;;
-            0) break ;;
-            *) echo -e "\e[31mInvalid choice.\e[0m" ;;
-        esac
-    done
-}
-# ── Permission manager ───────────────────────────────────────────────────
-_manage_permissions() {
-    local CONF="$1" LABEL="$2" USERNAME="$3"
-    local PERMS=("read_files" "write_files" "execute_commands" "git"
-                 "database_read" "database_write"
-                 "manage_services" "manage_nginx" "manage_ssl")
-    while true; do
-        echo -e "\n--- Permissions for $LABEL ---"
-        local i=1
-        for p in "${PERMS[@]}"; do
-            local v mark
-            v=$(_ai_json_get_bool "$CONF" "$p")
-            mark="[ ]"
-            [ "$v" = "true" ] && mark="[x]"
-            echo -e "  $i) $mark  $p"
-            i=$((i + 1))
-        done
-        echo "0) Save and Back"
-        read -r -p "Toggle permission number: " PNUM
-        case $PNUM in
-            0) break ;;
-            [0-9]*)
-                local idx=$((PNUM - 1))
-                if [ $idx -ge 0 ] && [ $idx -lt ${#PERMS[@]} ]; then
-                    local pm="${PERMS[$idx]}"
-                    local cur
-                    cur=$(_ai_json_get_bool "$CONF" "$pm")
-                    [ "$cur" = "true" ] && _ai_json_set "$CONF" "$pm" "false" || _ai_json_set "$CONF" "$pm" "true"
-                    _ai_json_set "$CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                    echo -e "${GREEN}Updated: $pm${NC}"
-                fi
-                ;;
-            *) echo -e "${RED}Invalid.${NC}" ;;
-        esac
-    done
-}
-
-# ── Manage Server AI Agent ──────────────────────────────────────────────
-manage_server_ai() {
-    mkdir -p "$PUSHIT_AI_DIR" "$PUSHIT_AI_LOG_DIR" 2>/dev/null || true
-    while true; do
-        echo -e "\n--- Server AI Agent ---"
-        local _inst _run _prov _model _url _key
-        _inst=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "installed" "false")
-        _run=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "running" "false")
-        _prov=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "provider" "-")
-        _model=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "model" "-")
-        _url=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "api_base_url" "-")
-        _key=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "api_key" "")
-        echo -e "  Config    : $PUSHIT_AI_SERVER_CONF"
-        if _ai_bin_exists; then
-            echo -e "  Binary    : ${GREEN}$PUSHIT_AI_BIN${NC}"
-        else
-            echo -e "  Binary    : ${YELLOW}not installed yet${NC}"
-        fi
-        echo -e "  Installed : $_inst"
-        echo -e "  Running   : $_run"
-        echo -e "  Provider  : $_prov"
-        echo -e "  Model     : $_model"
-        echo -e "  API Base  : $_url"
-        echo -e "  API Key   : $(_ai_mask_key "$_key")"
-        echo ""
-        echo "1) Status (refresh)"
-        echo "2) Install Agent"
-        echo "3) Uninstall Agent"
-        echo "4) Start"
-        echo "5) Stop"
-        echo "6) Restart"
-        echo "7) Update"
-        echo "8) Change Provider"
-        echo "9) Change API Key"
-        echo "10) Change API Base URL"
-        echo "11) Change Model"
-        echo "12) Manage Permissions"
-        echo "13) Run CLI Chat ($PUSHIT_AI_BIN chat)"
-        echo "0) Back"
-        read -r -p "Choice: " SAI_CHOICE
-        case $SAI_CHOICE in
-            1)
-                if _ai_bin_exists; then
-                    echo -e "  Binary: ${GREEN}OK${NC}"
-                    if systemctl is-active --quiet "pushit-ai-server" 2>/dev/null; then
-                        echo -e "  Service: ${GREEN}running${NC}"
-                        _ai_json_set "$PUSHIT_AI_SERVER_CONF" "running" "true"
-                    else
-                        echo -e "  Service: ${YELLOW}stopped${NC}"
-                        _ai_json_set "$PUSHIT_AI_SERVER_CONF" "running" "false"
-                    fi
-                else
-                    echo -e "  Binary: ${YELLOW}not installed${NC}"
-                fi
-                echo "  Installed : $(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "installed" "false")"
-                echo "  Updated   : $(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "updated_at" "-")"
-                ;;
-            2)
-                echo -e "${YELLOW}Installing AI agent binary and systemd units...${NC}"
-                if copy_ai_source_files && install_ai_agent; then
-                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "installed" "true"
-                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                    echo -e "${GREEN}Server AI agent installed.${NC}"
-                else
-                    echo -e "${RED}Agent installation failed.${NC}"
-                fi
-                ;;
-            3)
-                read -r -p "Uninstall Server AI? (y/N): " SU
-                if [[ "$SU" =~ ^[Yy]$ ]]; then
-                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "installed" "false"
-                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "running" "false"
-                    systemctl stop "pushit-ai-server" 2>/dev/null || true
-                    echo -e "${GREEN}Server AI uninstalled.${NC}"
-                fi
-                ;;
-            4)
-                if _ai_bin_exists; then
-                    systemctl start "pushit-ai-server" 2>/dev/null || true
-                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "running" "true"
-                    echo -e "${GREEN}Started.${NC}"
-                else
-                    echo -e "${RED}Not installed yet.${NC}"
-                fi
-                ;;
-            5)
-                systemctl stop "pushit-ai-server" 2>/dev/null || true
-                _ai_json_set "$PUSHIT_AI_SERVER_CONF" "running" "false"
-                echo -e "${GREEN}Stopped.${NC}"
-                ;;
-            6)
-                if _ai_bin_exists; then
-                    systemctl restart "pushit-ai-server" 2>/dev/null || true
-                    echo -e "${GREEN}Restarted.${NC}"
-                else
-                    echo -e "${RED}Not installed.${NC}"
-                fi
-                ;;
-            7)
-                if _ai_bin_exists; then
-                    systemctl restart "pushit-ai-server" 2>/dev/null || true
-                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                    echo -e "${GREEN}Update applied.${NC}"
-                fi
-                ;;
-            8)
-                read -r -p "New provider [$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "provider" "$PUSHIT_AI_DEFAULT_PROVIDER")]: " NPROV
-                NPROV=${NPROV:-$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "provider" "$PUSHIT_AI_DEFAULT_PROVIDER")}
-                _ai_json_set "$PUSHIT_AI_SERVER_CONF" "provider" "$NPROV"
-                _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                echo -e "${GREEN}Provider updated.${NC}"
-                ;;
-            9)
-                local ckey
-                ckey=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "api_key" "")
-                echo -e "  Current: $(_ai_mask_key "$ckey")"
-                read -r -s -p "New API Key: " NEWKEY
-                echo
-                if [ -n "$NEWKEY" ]; then
-                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "api_key" "$NEWKEY"
-                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                    echo -e "${GREEN}API Key updated.${NC}"
-                fi
-                ;;
-            10)
-                local curl_v
-                curl_v=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "api_base_url" "")
-                echo -e "  Current: $curl_v"
-                read -r -p "New API Base URL: " NEWURL
-                if [ -n "$NEWURL" ]; then
-                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "api_base_url" "$NEWURL"
-                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                    echo -e "${GREEN}Base URL updated.${NC}"
-                fi
-                ;;
-            11)
-                local cmodel
-                cmodel=$(_ai_conf_get "$PUSHIT_AI_SERVER_CONF" "model" "")
-                echo -e "  Current: $cmodel"
-                read -r -p "New model: " NEWMODEL
-                if [ -n "$NEWMODEL" ]; then
-                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "model" "$NEWMODEL"
-                    _ai_json_set "$PUSHIT_AI_SERVER_CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                    echo -e "${GREEN}Model updated.${NC}"
-                fi
-                ;;
-            12)
-                _manage_permissions "$PUSHIT_AI_SERVER_CONF" "(server-wide)" "root"
-                ;;
-            13)
-                if _ai_bin_exists; then
-                    $PUSHIT_AI_BIN chat
-                else
-                    echo -e "${RED}Agent not installed. Choose option 2 first.${NC}"
-                fi
-                ;;
-            0) break ;;
-            *) echo -e "\e[31mInvalid choice.\e[0m" ;;
-        esac
-    done
-}
-_manage_single_project_ai() {
-    local DOMAIN="$1" USERNAME="$2" CONF="$3"
-    local PROJ_PATH="/home/$USERNAME/$DOMAIN"
-    while true; do
-        echo -e "\n--- AI Agent: $DOMAIN ---"
-        echo "Path       : $PROJ_PATH"
-        echo "Config     : $CONF"
-        local _prov _model _url _inst _run
-        _prov=$(_ai_conf_get "$CONF" "provider" "-")
-        _model=$(_ai_conf_get "$CONF" "model" "-")
-        _url=$(_ai_conf_get "$CONF" "api_base_url" "-")
-        _inst=$(_ai_conf_get "$CONF" "installed" "false")
-        _run=$(_ai_conf_get "$CONF" "running" "false")
-        echo -e "  Status      : ${GREEN}$_inst${NC}  Run   : ${GREEN}$_run${NC}"
-        echo -e "  Provider    : $_prov    Model : $_model"
-        echo -e "  API Base URL: $_url"
-        echo ""
-        echo "1) Status (refresh)"
-        echo "2) Install Agent"
-        echo "3) Uninstall Agent"
-        echo "4) Start"
-        echo "5) Stop"
-        echo "6) Restart"
-        echo "7) Update"
-        echo "8) Change Provider"
-        echo "9) Change API Key"
-        echo "10) Change API Base URL"
-        echo "11) Change Model"
-        echo "12) Manage Permissions"
-        echo "0) Back"
-        read -r -p "Choice: " PAI_SUB
-        case $PAI_SUB in
-            1)
-                echo "  Installed : $_inst"
-                echo "  Running   : $_run"
-                if _ai_bin_exists; then
-                    echo -e "  Binary    : ${GREEN}$PUSHIT_AI_BIN${NC}"
-                    if systemctl is-active --quiet "pushit-ai@$USERNAME" 2>/dev/null; then
-                        echo -e "  Service   : ${GREEN}running${NC}"
-                        _ai_json_set "$CONF" "running" "true"
-                    else
-                        echo -e "  Service   : ${YELLOW}stopped${NC}"
-                        _ai_json_set "$CONF" "running" "false"
-                    fi
-                else
-                    echo -e "  Binary    : ${YELLOW}not installed yet${NC}"
-                fi
-                ;;
-            2)
-                _ai_json_set "$CONF" "installed" "true"
-                _ai_json_set "$CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                echo -e "${GREEN}Marked as installed.${NC}"
-                ;;
-            3)
-                read -r -p "Uninstall for $DOMAIN? (y/N): " UC
-                if [[ "$UC" =~ ^[Yy]$ ]]; then
-                    _ai_json_set "$CONF" "installed" "false"
-                    _ai_json_set "$CONF" "running" "false"
-                    rm -f "/run/pushit-ai-${USERNAME}.pid" 2>/dev/null || true
-                    systemctl stop "pushit-ai@$USERNAME" 2>/dev/null || true
-                    echo -e "${GREEN}Uninstalled.${NC}"
-                fi
-                ;;
-            4)
-                if _ai_bin_exists; then
-                    systemctl start "pushit-ai@$USERNAME" 2>/dev/null || true
-                    _ai_json_set "$CONF" "running" "true"
-                    echo -e "${GREEN}Started.${NC}"
-                else
-                    echo -e "${RED}Not installed yet.${NC}"
-                fi
-                ;;
-            5)
-                systemctl stop "pushit-ai@$USERNAME" 2>/dev/null || true
-                _ai_json_set "$CONF" "running" "false"
-                echo -e "${GREEN}Stopped.${NC}"
-                ;;
-            6)
-                if _ai_bin_exists; then
-                    systemctl restart "pushit-ai@$USERNAME" 2>/dev/null || true
-                    echo -e "${GREEN}Restarted.${NC}"
-                else
-                    echo -e "${RED}Not installed.${NC}"
-                fi
-                ;;
-            7)
-                if _ai_bin_exists; then
-                    systemctl restart "pushit-ai@$USERNAME" 2>/dev/null || true
-                    _ai_json_set "$CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                    echo -e "${GREEN}Update applied.${NC}"
-                fi
-                ;;
-            8)
-                read -r -p "New provider [$(_ai_conf_get "$CONF" "provider" "$PUSHIT_AI_DEFAULT_PROVIDER")]: " NP
-                NP=${NP:-$(_ai_conf_get "$CONF" "provider" "$PUSHIT_AI_DEFAULT_PROVIDER")}
-                _ai_json_set "$CONF" "provider" "$NP"
-                _ai_json_set "$CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                echo -e "${GREEN}Provider updated.${NC}"
-                ;;
-            9)
-                local cur_key
-                cur_key=$(_ai_conf_get "$CONF" "api_key" "")
-                echo -e "  Current key : $(_ai_mask_key "$cur_key")"
-                read -r -s -p "New API Key: " NK
-                echo
-                if [ -n "$NK" ]; then
-                    _ai_json_set "$CONF" "api_key" "$NK"
-                    _ai_json_set "$CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                    echo -e "${GREEN}API Key updated.${NC}"
-                fi
-                ;;
-            10)
-                local cur_url
-                cur_url=$(_ai_conf_get "$CONF" "api_base_url" "")
-                echo -e "  Current URL : $cur_url"
-                read -r -p "New API Base URL: " NU
-                if [ -n "$NU" ]; then
-                    _ai_json_set "$CONF" "api_base_url" "$NU"
-                    _ai_json_set "$CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                    echo -e "${GREEN}Base URL updated.${NC}"
-                fi
-                ;;
-            11)
-                local cur_model
-                cur_model=$(_ai_conf_get "$CONF" "model" "")
-                echo -e "  Current model : $cur_model"
-                read -r -p "New model: " NM
-                if [ -n "$NM" ]; then
-                    _ai_json_set "$CONF" "model" "$NM"
-                    _ai_json_set "$CONF" "updated_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                    echo -e "${GREEN}Model updated.${NC}"
-                fi
-                ;;
-            12)
-                _manage_permissions "$CONF" "$DOMAIN" "$USERNAME"
-                ;;
-            0) break ;;
-            *) echo -e "\e[31mInvalid choice.\e[0m" ;;
-        esac
-    done
-}
-
-
 manage_dns() {
     while true; do
         if [ -L /etc/resolv.conf ]; then LINK=" -> $(readlink /etc/resolv.conf)"; else LINK=""; fi
@@ -3657,8 +3457,7 @@ show_menu() {
         echo "12) Update Script (from GitHub)"
     fi
     echo -e "${RED}13) Uninstall Pushit (remove script & cache)${NC}"
-    echo "14) Manage Server AI Agent"
-    echo "15) Manage Server Users (List / Password / Delete)"
+    echo "14) Manage Server Users (List / Password / Delete)"
     read -r -p "Option [u=update]: " OPT
     # Shortcut: 'u' / 'U' triggers update when available, or anyway
     if [[ "$OPT" =~ ^[uU]$ ]]; then OPT="12"; fi
@@ -3677,8 +3476,7 @@ show_menu() {
         11) pushit_first_run_wizard ;;
         12) pushit_update_script ;;
         13) pushit_uninstall ;;
-        14) manage_server_ai ;;
-        15) manage_server_users ;;
+        14) manage_server_users ;;
         *) echo "Invalid option." ;;
     esac
 }
