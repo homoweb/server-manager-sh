@@ -823,7 +823,7 @@ pushit_stack_report_commands() {
 }
 
 pushit_stack_report_install_messages() {
-    local install_log="$1" installer_status="$2" line component state
+    local install_log="$1" line component
     local warning_lines="" error_lines=""
     if [ -z "$install_log" ] || [ ! -r "$install_log" ]; then
         pushit_stack_report_add WARN "Installer output" "Could not capture the installation output."
@@ -833,7 +833,7 @@ pushit_stack_report_install_messages() {
         | grep -Eai 'SyntaxWarning:|DeprecationWarning:|(^|[[:space:]])W:|(^|[[:space:]])warn([[:space:]:]|$)' \
         | awk 'NF && !seen[$0]++' || true)
     error_lines=$(sed -E 's/\x1B\[[0-9;]*[[:alpha:]]//g' "$install_log" 2>/dev/null \
-        | grep -Eai '(^|[[:space:]])E:|(^|[[:space:]])Err:|dpkg:.*error|(^|[[:space:]])error:|Failed to fetch|failed([[:space:]]+to|[[:space:]]+with|[[:space:]]*$|:[[:space:]]*|[.]([[:space:]]|$))|ERROR([[:space:]:]|$)|npm ERR!|curl: \([0-9]+\)' \
+        | grep -Eai 'TimeoutError|Connection timed out|(^|[[:space:]])E:|(^|[[:space:]])Err:|dpkg:.*error|(^|[[:space:]])error:|Failed to fetch|failed([[:space:]]+to|[[:space:]]+with|[[:space:]]*$|:[[:space:]]*|[.]([[:space:]]|$))|ERROR([[:space:]:]|$)|npm ERR!|curl: \([0-9]+\)' \
         | awk 'NF && !seen[$0]++' || true)
 
     if [ -z "$warning_lines" ] && [ -z "$error_lines" ]; then
@@ -843,16 +843,14 @@ pushit_stack_report_install_messages() {
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         component="Installer warning"
-        [[ "${line,,}" == *fail2ban* ]] && component="Fail2ban warning"
+        if grep -qi 'fail2ban' <<< "$line"; then component="Fail2ban warning"; fi
         pushit_stack_report_add WARN "$component" "$line"
     done <<< "$warning_lines"
-    state=WARN
-    [ "$installer_status" -ne 0 ] && state=ERROR
     while IFS= read -r line; do
         [ -n "$line" ] || continue
-        component="Installer diagnostic"
-        [[ "${line,,}" == *fail2ban* ]] && component="Fail2ban diagnostic"
-        pushit_stack_report_add "$state" "$component" "$line"
+        component="Installer error"
+        if grep -qi 'fail2ban' <<< "$line"; then component="Fail2ban error"; fi
+        pushit_stack_report_add ERROR "$component" "$line"
     done <<< "$error_lines"
 }
 
@@ -1011,7 +1009,7 @@ pushit_stack_health_report() {
         pushit_stack_report_add ERROR "Certbot" "${version:-Command not found or version check failed}."
     fi
 
-    pushit_stack_report_install_messages "$install_log" "$installer_status"
+    pushit_stack_report_install_messages "$install_log"
     if [ "$installer_status" -ne 0 ]; then
         pushit_stack_report_add ERROR "Full Stack installer" "Installer returned status $installer_status; review the output above."
     fi
@@ -1080,14 +1078,18 @@ _pushit_install_stack_body() {
     CODENAME=$(lsb_release -cs)
     case "$CODENAME" in
         focal|jammy|noble)
-            add-apt-repository ppa:ondrej/php -y
-            apt-get update
-            apt-get install -y "php${PHP_VERSION}-fpm" "php${PHP_VERSION}-cli" "php${PHP_VERSION}-mysql" "php${PHP_VERSION}-pgsql" \
-                "php${PHP_VERSION}-redis" "php${PHP_VERSION}-xml" "php${PHP_VERSION}-mbstring" \
-                "php${PHP_VERSION}-curl" "php${PHP_VERSION}-zip" "php${PHP_VERSION}-gd" "php${PHP_VERSION}-bcmath"
+            if add-apt-repository ppa:ondrej/php -y && apt-get update; then
+                if ! apt-get install -y "php${PHP_VERSION}-fpm" "php${PHP_VERSION}-cli" "php${PHP_VERSION}-mysql" "php${PHP_VERSION}-pgsql" \
+                    "php${PHP_VERSION}-redis" "php${PHP_VERSION}-xml" "php${PHP_VERSION}-mbstring" \
+                    "php${PHP_VERSION}-curl" "php${PHP_VERSION}-zip" "php${PHP_VERSION}-gd" "php${PHP_VERSION}-bcmath"; then
+                    echo -e "${RED}ERROR: PHP ${PHP_VERSION} packages could not be installed from the ondrej/php repository.${NC}"
+                fi
+            else
+                echo -e "${RED}ERROR: Could not add or update the ondrej/php repository; PHP package installation was skipped.${NC}"
+            fi
             ;;
         *)
-            echo -e "${YELLOW}Codename '$CODENAME' is not supported by the ondrej/php PPA.${NC}"
+            echo -e "${RED}ERROR: Codename '$CODENAME' is not supported by the ondrej/php PPA.${NC}"
             echo -e "${YELLOW}Install PHP ${PHP_VERSION} manually, then re-run this option.${NC}"
             ;;
     esac
@@ -1164,7 +1166,7 @@ _pushit_install_stack_body() {
         echo -e "${YELLOW}Stack installation finished, but PostgreSQL is not ready. Retry its installation from Manage DB.${NC}"
         return 1
     fi
-    echo -e "${GREEN}Stack installed successfully.${NC}"
+    echo -e "${YELLOW}Installation steps completed; checking installed components now.${NC}"
 }
 
 install_stack() {
